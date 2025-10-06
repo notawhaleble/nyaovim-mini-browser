@@ -7,13 +7,14 @@ This is [NyaoVim](https://github.com/rhysd/NyaoVim) UI plugin to open an embedde
 
 ## Installation
 
-Install this repository as Vim plugin with your favorite plugin manager.  And put `<mini-browser>` component to your `nyaovimrc.html` as below.
+Install this repository as Vim plugin with your favorite plugin manager.  Add the overlay layer to your `nyaovimrc.html` as below.
 
 ```html
 <style>
   /* CSS configurations here */
   .horizontal {
-    display: flex;
+    position: relative;
+    display: block;
     width: 100%;
     height: 100%;
   }
@@ -21,21 +22,48 @@ Install this repository as Vim plugin with your favorite plugin manager.  And pu
     width: 100%;
     height: 100%;
   }
+  overlay-manager {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
 </style>
 
-<!-- Put your component in flex box layout  -->
+<!-- Overlay manager keeps UI plugins on top of the editor -->
 <div class="horizontal">
   <neovim-editor id="nyaovim-editor" argv$="[[argv]]"></neovim-editor>
-  <mini-browser editor="[[editor]]"></mini-browser>
+  <overlay-manager editor="[[editor]]"></overlay-manager>
 </div>
 ```
 
-This is a setting example.  You can put `<mini-browser>` component as you like.
+This is a setting example.  You can position `<overlay-manager>` anywhere that sits on top of your editor surface.
+
+### Overlay manager
+
+`overlay-manager` keeps one or more UI plugins (including the mini browser) on a dedicated overlay layer. Every `:MiniBrowser` call now emits `overlay:*` notifications so multiple browser panes can coexist, each bound to the buffer that spawned them—even if the buffer is moved to another window or tab. Legacy `mini-browser:*` notifications are still emitted for backward compatibility.
+
+A convenient way to jump between the overlay and Neovim is to map the focus command, for example:
+
+```vim
+nnoremap <Leader>mb :MiniBrowserToggleFocus<CR>
+```
+
+Map the focus toggle yourself so it never collides with Neovim defaults, e.g.:
+
+```vim
+nnoremap <silent> <C-]> :MiniBrowserToggleFocus<CR>
+```
+
+While the overlay has focus, pressing the same key (default `Ctrl+]`) will take you back to the editor.
 
 ## Commands
 
-- `:MiniBrowser [url]`: Open mini browser with specified URL.  If `url` is omitted, previous page is shown.  If you add `!` to the command, focus doesn't move after opening a browser.
-- `:MiniBrowserClose`: Close mini browser.
+- `:MiniBrowser [url] [id]`: Open (or reuse) a mini browser overlay for the current buffer. If `url` is omitted, the previous page is shown; omit `id` to bind to the current buffer automatically, or supply your own name to manage overlays manually. Add `!` to avoid focusing the browser after opening.
+- `:MiniBrowserClose [id]`: Hide the mini browser attached to the current window (or the optional `id`).
+- `:MiniBrowserFocus[Browser|Editor|Toggle] [id]`: Focus the mini browser overlay, the editor, or toggle between them using either the current buffer or an explicit `id`.
 
 ## Keymaps In Browser
 

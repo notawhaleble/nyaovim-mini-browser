@@ -3,8 +3,8 @@
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.5.0/css/font-awesome.min.css">
     <style>
       :host {
-        width: auto;
-        height: auto;
+        display: block;
+        height: 100%;
       }
       #mini-browser-body {
         display: none;
@@ -13,54 +13,16 @@
         flex-direction: column;
         font-family: Consolas,"Liberation Mono",Menlo,Courier,monospace;
       }
-      #mini-browser-title-bar {
-        height: 24px;
-        width: 100%;
-        flex: none;
-        display: flex;
-        flex-direction: row;
-        text-align: center;
-        border-bottom: solid 1px dimgray;
-        color: dimgray;
-        background-color: #dddddd;
-      }
       #mini-browser-view {
         flex: auto;
-        height: calc(100vh - 24px);
+        height: 100%;
         width: 100%;
-      }
-      .browser-ui-button {
-        border: solid 1px;
-        border-radius: 4px;
-        margin: 2px;
-        padding: 4px;
-        flex: none;
-        min-width: 20px;
-        font-size: 14px;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      #mini-browser-title {
-        flex: auto;
-        font-size: 16px;
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-        margin: 0px 8px;
-        line-height: 24px;
+        background-color: #ffffff;
       }
     </style>
 
     <div id="mini-browser-body">
-      <div id="mini-browser-title-bar">
-        <div class="browser-ui-button" id="mini-browser-back-btn"><i class="fa fa-arrow-left"></i></div>
-        <div class="browser-ui-button" id="mini-browser-forward-btn"><i class="fa fa-arrow-right"></i></div>
-        <div id="mini-browser-title"></div>
-        <div class="browser-ui-button" id="mini-browser-close-btn"><i class="fa fa-times"></i></div>
-      </div>
-      <webview id="mini-browser-view" autosize="on"></webview>
+      <webview id="mini-browser-view"></webview>
     </div>
   </template>
 </dom-module>
@@ -85,6 +47,32 @@
         type: Number,
         value: 360    // Nexus5 width
       },
+      height: {
+        type: Number,
+        value: 240
+      },
+      dock: {
+        type: String,
+        value: 'right'
+      },
+      matchActiveWindow: {
+        type: Boolean,
+        value: false
+      },
+      overlayMode: {
+        type: Boolean,
+        value: false,
+        reflectToAttribute: true
+      },
+      externalControl: {
+        type: Boolean,
+        value: false,
+        reflectToAttribute: true
+      },
+      overlayId: {
+        type: String,
+        value: ''
+      },
       useragent: {
         type: String,
         value: 'Mozilla/5.0 (Linux; Android 4.4.4; Nexus 5 Build/KTU84P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/38.0.2125.114 Mobile Safari/537.36/5.0 (iPhone; CPU iPhone OS 8_0 like Mac OS X) AppleWebKit/600.1.3 (KHTML, like Gecko) Version/8.0 Mobile/12A4345d Safari/600.1.4'
@@ -92,28 +80,62 @@
       editor: Object
     },
 
+    observers: [
+      'onLayoutPropertyChange(width, height, dock, matchActiveWindow, visible)'
+    ],
+
     ready: function() {
       this.body = this.$['mini-browser-body'];
       this.browser = this.$['mini-browser-view'];
-      this.title_text = this.$['mini-browser-title'];
-      this.$['mini-browser-back-btn'].onclick = () => {
-        this.browser.goBack();
-      };
-      this.$['mini-browser-forward-btn'].onclick = () => {
-        this.browser.goForward();
-      };
-      this.$['mini-browser-close-btn'].onclick = () => {
-        this.browser.src = '';
-        this.close();
-      };
-      this.body.style.width = this.width + 'px';
+      this.pendingWindowMetrics = null;
+      this.windowResizeHandler = null;
+      this._pendingOverlayOptions = this._pendingOverlayOptions || null;
+      this._pendingOpen = this._pendingOpen || null;
+      this.activeTarget = 'editor';
+      this.isForeground = true;
+      this.windowKeyHandler = null;
+      this.body.setAttribute('tabindex', '-1');
+      const preloadUrl = this.resolveUrl('mini-browser-preload.js');
+      this.browser.setAttribute('preload', preloadUrl);
+      this.applyLayout();
       this.browser.useragent = this.useragent;
       this.browser.src = this.url;
       this.browser.addEventListener('dom-ready', () => {
-        this.title_text.textContent = this.browser.getTitle();
+        this.browser.send('mini-browser:set-overlay-id', this.overlayId);
+      });
+      this.browser.addEventListener('ipc-message', e => {
+        if (e.channel === 'mini-browser:toggle') {
+          this.handleExternalFocusRequest('toggle');
+        }
+      });
+      this.browser.addEventListener('did-fail-load', e => {
+        console.error('[mini-browser] did-fail-load', e);
+      });
+      this.browser.addEventListener('focus', () => {
+        this.activeTarget = 'browser';
+      });
+      this.browser.addEventListener('blur', () => {
+        if (this.activeTarget === 'browser') {
+          this.activeTarget = 'editor';
+        }
+      });
+      this.browser.addEventListener('before-input-event', e => {
+        const key = e.key ? e.key.toLowerCase() : '';
+        console.log('[mini-browser] before-input-event', {overlayId: this.overlayId, key, ctrl: e.ctrlKey, isForeground: this.isForeground});
+        if (this.isForeground && e.ctrlKey && key === ']') {
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          this.sendToggleCommand();
+        }
       });
       this.body.addEventListener('keydown', e => {
-        switch (String.fromCharCode(e.keyCode).toLowerCase()) {
+        if (!this.isForeground) {
+          return;
+        }
+        const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
+        switch (key) {
           case 'j':
             this.browser.executeJavaScript(
               `(function(){
@@ -179,58 +201,439 @@
               this.browser.openDevTools();
             }
             break;
+          case ']':
+            if (e.ctrlKey) {
+              e.preventDefault();
+              this.sendToggleCommand();
+            }
+            break;
           default:
             break;
         }
       });
+      this.windowKeyHandler = e => {
+        if (!this.visible || !this.isForeground || this.offsetParent === null || !e.ctrlKey) {
+          return;
+        }
+        const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
+        console.log('[mini-browser] window keydown', {overlayId: this.overlayId, key, ctrl: e.ctrlKey, isForeground: this.isForeground});
+        if (key === ']') {
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          this.sendToggleCommand();
+        }
+      };
+      window.addEventListener('keydown', this.windowKeyHandler, true);
       if (this.visible) {
         this.show();
       }
 
       this.client = this.editor.getClient();
-      this.client.on('notification', (method, args) => {
-        switch(method) {
-          case 'mini-browser:open': {
-            if (typeof args[0] === 'string') {
-              this.open(args[0], args[1] === undefined || args[1]);
-            } else {
-              this.show(args[0] === undefined || args[0]);
-            }
-            break;
+      if (!this.externalControl) {
+        this.client.on('notification', this.legacyNotificationHandler.bind(this));
+        this.client.subscribe('mini-browser:open');
+        this.client.subscribe('mini-browser:close');
+        this.client.subscribe('mini-browser:focus');
+        this.windowResizeHandler = () => {
+          if (this.matchActiveWindow && this.visible) {
+            this.scheduleWindowMetricsRefresh();
           }
-          case 'mini-browser:close': {
-            this.close();
-            break;
-          }
+        };
+        window.addEventListener('resize', this.windowResizeHandler);
+      }
+
+      if (this._pendingOverlayOptions) {
+        const pending = this._pendingOverlayOptions;
+        this._pendingOverlayOptions = null;
+        this.applyOverlayOptionsNow(pending);
+      }
+      if (this._pendingOpen) {
+        const pendingOpen = this._pendingOpen;
+        this._pendingOpen = null;
+        if (pendingOpen.url !== undefined) {
+          this.browser.src = pendingOpen.url;
         }
+        this.show(pendingOpen.focus);
+      }
+    },
+
+    detached: function() {
+      if (this.windowKeyHandler) {
+        window.removeEventListener('keydown', this.windowKeyHandler, true);
+        this.windowKeyHandler = null;
+      }
+      if (this.externalControl) {
+        if (this.pendingWindowMetrics) {
+          clearTimeout(this.pendingWindowMetrics);
+          this.pendingWindowMetrics = null;
+        }
+        return;
+      }
+      if (this.windowResizeHandler) {
+        window.removeEventListener('resize', this.windowResizeHandler);
+        this.windowResizeHandler = null;
+      }
+      if (this.pendingWindowMetrics) {
+        clearTimeout(this.pendingWindowMetrics);
+        this.pendingWindowMetrics = null;
+      }
+    },
+
+    legacyNotificationHandler(method, args) {
+      if (method === 'redraw') {
+        if (this.matchActiveWindow && this.visible && this.shouldRefreshWindowMetrics(args)) {
+          this.scheduleWindowMetricsRefresh();
+        }
+        return;
+      }
+      switch(method) {
+        case 'mini-browser:open': {
+          if (typeof args[0] === 'string') {
+            this.open(args[0], args[1] === undefined || args[1]);
+          } else {
+            this.show(args[0] === undefined || args[0]);
+          }
+          break;
+        }
+        case 'mini-browser:close': {
+          this.close();
+          break;
+        }
+        case 'mini-browser:focus': {
+          const target = Array.isArray(args) && args.length > 0 ? args[0] : undefined;
+          this.handleExternalFocusRequest(target);
+          break;
+        }
+      }
+    },
+
+    onLayoutPropertyChange() {
+      if (!this.body) {
+        return;
+      }
+      this.applyLayout();
+      if (this.matchActiveWindow && this.visible) {
+        this.scheduleWindowMetricsRefresh(true);
+      }
+    },
+
+    applyLayout() {
+      const dock = (this.dock || 'right').toLowerCase();
+      const visible = this.visible;
+      if (this.overlayMode) {
+        this.body.style.flexDirection = 'column';
+        this.body.style.height = '100%';
+        this.body.style.width = '100%';
+        this.body.style.display = visible ? 'flex' : 'none';
+        this.style.display = visible ? 'block' : 'none';
+        this.style.width = '100%';
+        this.style.height = '100%';
+        this.style.marginLeft = '0px';
+        this.style.bottom = '0px';
+        return;
+      }
+      if (dock === 'bottom') {
+        this.body.style.flexDirection = 'column';
+        this.body.style.height = this.height + 'px';
+        if (!this.matchActiveWindow) {
+          this.body.style.width = '100%';
+          this.style.marginLeft = '0px';
+        } else {
+          this.body.style.width = this.width + 'px';
+        }
+        if (visible) {
+          this.style.display = 'block';
+          this.style.height = this.height + 'px';
+          this.style.width = this.matchActiveWindow ? this.width + 'px' : '100%';
+          this.style.bottom = '0px';
+        } else {
+          this.style.display = 'none';
+          this.style.height = '0px';
+          this.style.width = '0px';
+          this.style.marginLeft = '0px';
+          this.style.bottom = '0px';
+        }
+      } else {
+        this.body.style.flexDirection = 'column';
+        this.body.style.height = '100%';
+        this.body.style.width = this.width + 'px';
+        if (visible) {
+          this.style.display = 'block';
+          this.style.height = '100%';
+          this.style.width = this.width + 'px';
+        } else {
+          this.style.display = 'none';
+          this.style.height = '100%';
+          this.style.width = '0px';
+        }
+        this.style.marginLeft = '0px';
+        this.style.bottom = '0px';
+      }
+    },
+
+    scheduleWindowMetricsRefresh(force) {
+      if (!this.matchActiveWindow) {
+        return;
+      }
+      if (!force && !this.visible) {
+        return;
+      }
+      if (this.pendingWindowMetrics) {
+        clearTimeout(this.pendingWindowMetrics);
+      }
+      const delay = force ? 0 : 100;
+      this.pendingWindowMetrics = setTimeout(() => {
+        this.pendingWindowMetrics = null;
+        this.updateActiveWindowMetrics();
+      }, delay);
+    },
+
+    shouldRefreshWindowMetrics(events) {
+      if (!Array.isArray(events)) {
+        return false;
+      }
+      for (const evt of events) {
+        if (!Array.isArray(evt) || evt.length === 0) {
+          continue;
+        }
+        const name = evt[0];
+        if (name === 'win_pos' || name === 'win_resize' || name === 'grid_resize' || name === 'win_viewport') {
+          return true;
+        }
+      }
+      return false;
+    },
+
+    updateActiveWindowMetrics() {
+      if (!this.matchActiveWindow || !this.visible) {
+        return;
+      }
+      const dock = (this.dock || 'right').toLowerCase();
+      if (dock !== 'bottom') {
+        return;
+      }
+      const {width: charWidth} = this.getCharMetrics();
+      if (!this.client) {
+        return;
+      }
+      this.client.eval('[winwidth(0), win_screenpos(0)]').then(result => {
+        if (!Array.isArray(result) || result.length < 2) {
+          return;
+        }
+        const winWidthCols = Number(result[0]);
+        const screenPos = Array.isArray(result[1]) ? result[1] : null;
+        const offsetCols = screenPos && screenPos.length > 1 ? Math.max(0, Number(screenPos[1]) - 1) : 0;
+        if (Number.isNaN(winWidthCols) || winWidthCols <= 0) {
+          return;
+        }
+        const widthPx = Math.max(0, Math.round(winWidthCols * charWidth));
+        const offsetPx = Math.max(0, Math.round(offsetCols * charWidth));
+        this.body.style.width = widthPx + 'px';
+        this.style.width = widthPx + 'px';
+        this.style.marginLeft = offsetPx + 'px';
+        this.style.height = this.height + 'px';
+        this.style.bottom = '0px';
+      }).catch(err => {
+        console.error('[mini-browser] updateActiveWindowMetrics failed', err);
       });
-      this.client.subscribe('mini-browser:open');
-      this.client.subscribe('mini-browser:close');
+    },
+
+    getCharMetrics() {
+      const screen = this.editor && this.editor.screen;
+      const attrs = screen && screen.store && screen.store.font_attr;
+      if (attrs) {
+        const width = attrs.width || (attrs.draw_width / (window.devicePixelRatio || 1));
+        const height = attrs.height || (attrs.draw_height / (window.devicePixelRatio || 1));
+        return {
+          width: width || 8,
+          height: height || 16
+        };
+      }
+      return {width: 8, height: 16};
+    },
+
+    focusBrowser() {
+      if (!this.visible) {
+        this.show(true);
+        return;
+      }
+      if (this.browser) {
+        setTimeout(() => {
+          if (this.browser && typeof this.browser.focus === 'function') {
+            this.browser.focus();
+          }
+        }, 0);
+      }
+      this.activeTarget = 'browser';
+    },
+
+    focusEditor() {
+      if (this.editor && typeof this.editor.focus === 'function') {
+        this.editor.focus();
+      }
+      this.activeTarget = 'editor';
+    },
+
+    handleExternalFocusRequest(target) {
+      const command = target === undefined ? 'toggle' : String(target).toLowerCase();
+      if (!this.isForeground && command !== 'browser') {
+        return;
+      }
+      switch (command) {
+        case 'editor':
+          this.focusEditor();
+          break;
+        case 'browser':
+          this.focusBrowser();
+          break;
+        default:
+          this.toggleFocusImpl();
+          break;
+      }
+    },
+
+    setOverlayOptions(options) {
+      if (!options) {
+        return;
+      }
+      this._pendingOverlayOptions = Object.assign({}, this._pendingOverlayOptions || {}, options);
+      if (!this.body || !this.browser) {
+        return;
+      }
+      const pending = this._pendingOverlayOptions;
+      this._pendingOverlayOptions = null;
+      this.applyOverlayOptionsNow(pending);
+    },
+
+    applyOverlayOptionsNow(options) {
+      if (!options) {
+        return;
+      }
+      if (options.overlayId !== undefined) {
+        this.overlayId = String(options.overlayId);
+      }
+      if (options.url !== undefined && options.url !== this.url) {
+        this.url = options.url;
+        if (this.visible || this.overlayMode) {
+          this.browser.src = this.url;
+        }
+      }
+      if (options.width !== undefined) {
+        this.width = Number(options.width);
+      }
+      if (options.height !== undefined) {
+        this.height = Number(options.height);
+      }
+      if (options.matchActiveWindow !== undefined) {
+        this.matchActiveWindow = !!options.matchActiveWindow;
+      }
+      if (options.overlayMode !== undefined) {
+        this.overlayMode = !!options.overlayMode;
+      }
+      if (options.useragent !== undefined) {
+        this.useragent = options.useragent;
+        this.browser.useragent = this.useragent;
+      }
+      if (options.dock !== undefined) {
+        this.dock = options.dock;
+      }
+      if (options.visible === true) {
+        this.show(options.focus === undefined ? false : !!options.focus);
+      } else if (options.visible === false) {
+        this.close();
+      }
+      if (options.foreground !== undefined) {
+        this.setOverlayForeground(options.foreground);
+      }
+    },
+
+    setOverlayForeground(foreground) {
+      this.isForeground = !!foreground;
+      if (!this.isForeground && this.activeTarget === 'browser') {
+        this.focusEditor();
+      }
     },
 
     show(focus) {
       if (!this.visible) {
         this.body.style.display = 'flex';
         this.visible = true;
-        this.editor.screen.checkShouldResize();
+        this.applyLayout();
+        this.scheduleWindowMetricsRefresh(true);
+        if (!this.overlayMode) {
+          this.editor.screen.checkShouldResize();
+        }
+        this.isForeground = true;
       }
       if (focus) {
-        this.browser.focus();
+        if (this.browser && typeof this.browser.focus === 'function') {
+          this.browser.focus();
+        }
+        if (this.body && typeof this.body.focus === 'function') {
+          this.body.focus();
+        }
+        this.activeTarget = 'browser';
+      } else {
+        this.activeTarget = 'editor';
       }
     },
 
     open(url, focus) {
+      if (!this.body || !this.browser) {
+        this._pendingOpen = {
+          url,
+          focus,
+        };
+        if (url !== undefined) {
+          this.url = url;
+        }
+        return;
+      }
       this.browser.src = url;
       this.show(focus);
     },
 
     close() {
       if (this.visible) {
-        this.browser.src = '';
+        if (!this.overlayMode) {
+          this.browser.src = '';
+        }
         this.body.style.display = 'none';
         this.visible = false;
-        this.editor.screen.checkShouldResize();
+        this.applyLayout();
+        if (!this.overlayMode) {
+          this.editor.screen.checkShouldResize();
+        }
         this.editor.focus();
+        this.activeTarget = 'editor';
+        this.isForeground = false;
+      }
+    },
+
+    sendToggleCommand() {
+      if (!this.isForeground || this.offsetParent === null) {
+        return;
+      }
+      if (this.activeTarget === 'browser') {
+        this.toggleFocusImpl();
+        return;
+      }
+      console.log('[mini-browser] sendToggleCommand', {overlayId: this.overlayId});
+      if (this.client) {
+        this.client.command('MiniBrowserToggleFocus').catch(err => console.error('[mini-browser] toggle command failed', err));
+      }
+    },
+
+    toggleFocusImpl() {
+      if (!this.visible || !this.isForeground || this.offsetParent === null) {
+        return;
+      }
+      if (this.activeTarget === 'browser') {
+        this.focusEditor();
+      } else {
+        this.focusBrowser();
       }
     }
   });

@@ -1,0 +1,573 @@
+<dom-module id="overlay-manager">
+  <template>
+    <style>
+      :host {
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        overflow: visible;
+      }
+      #overlay-root {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+      .overlay-entry {
+        position: absolute;
+        pointer-events: auto;
+        overflow: hidden;
+        display: none;
+      }
+    </style>
+
+    <div id="overlay-root"></div>
+  </template>
+</dom-module>
+
+<script>
+(function() {
+  'use strict';
+
+  Polymer({
+    is: 'overlay-manager',
+
+    properties: {
+      editor: Object,
+    },
+
+    ready: function() {
+      this.client = this.editor.getClient();
+      this.overlays = new Map();
+      this.geometryCache = new Map();
+      this.charMetrics = null;
+
+      this.notificationHandler = (method, args) => {
+        switch (method) {
+          case 'overlay:open':
+            this.handleOpen(args && args[0]);
+            break;
+          case 'overlay:update':
+            this.handleUpdate(args && args[0]);
+            break;
+          case 'overlay:close':
+            this.handleClose(args && args[0]);
+            break;
+          case 'overlay:focus':
+            this.handleFocus.apply(this, args || []);
+            break;
+          case 'redraw':
+            this.handleRedraw(args);
+            break;
+          default:
+            break;
+        }
+      };
+
+      this.client.on('notification', this.notificationHandler);
+      this.client.subscribe('overlay:open');
+      this.client.subscribe('overlay:update');
+      this.client.subscribe('overlay:close');
+      this.client.subscribe('overlay:focus');
+
+      this.resizeListener = () => {
+        this.charMetrics = null;
+        this.refreshAllGeometry();
+      };
+      window.addEventListener('resize', this.resizeListener);
+    },
+
+    detached: function() {
+      if (this.client && this.notificationHandler) {
+        if (typeof this.client.removeListener === 'function') {
+          this.client.removeListener('notification', this.notificationHandler);
+        } else if (typeof this.client.off === 'function') {
+          this.client.off('notification', this.notificationHandler);
+        }
+        this.notificationHandler = null;
+      }
+      if (this.client) {
+        this.client.unsubscribe('overlay:open').catch(() => {});
+        this.client.unsubscribe('overlay:update').catch(() => {});
+        this.client.unsubscribe('overlay:close').catch(() => {});
+        this.client.unsubscribe('overlay:focus').catch(() => {});
+      }
+      if (this.resizeListener) {
+        window.removeEventListener('resize', this.resizeListener);
+        this.resizeListener = null;
+      }
+      this.overlays.forEach(entry => this.destroyOverlay(entry.id));
+      this.overlays.clear();
+    },
+
+    handleOpen: function(payload) {
+      if (!payload) {
+        return;
+      }
+      const id = this.normalizeId(payload.id);
+      if (!id) {
+        console.error('[overlay-manager] Invalid overlay id', payload);
+        return;
+      }
+      const pluginName = payload.plugin || 'mini-browser';
+      let entry = this.overlays.get(id);
+      if (!entry) {
+        entry = this.createOverlay(id, pluginName, payload.options || {});
+        if (!entry) {
+          return;
+        }
+        this.overlays.set(id, entry);
+      }
+      entry.options = Object.assign({}, entry.options, payload.options || {});
+      entry.persistent = payload.persistent === true || entry.persistent === true;
+      this.showOverlay(entry, payload);
+    },
+
+    handleUpdate: function(payload) {
+      if (!payload) {
+        return;
+      }
+      const id = this.normalizeId(payload.id);
+      const entry = this.overlays.get(id);
+      if (!entry) {
+        return;
+      }
+      entry.options = Object.assign({}, entry.options, payload.options || {});
+      if (payload.plugin && payload.plugin !== entry.plugin) {
+        this.replaceOverlayPlugin(entry, payload.plugin, entry.options);
+      }
+      this.refreshOverlay(entry, true);
+    },
+
+    handleClose: function(payload) {
+      const id = this.normalizeId(payload && (payload.id !== undefined ? payload.id : payload));
+      if (!id) {
+        return;
+      }
+      const entry = this.overlays.get(id);
+      if (!entry) {
+        return;
+      }
+      if (payload && payload.destroy === true) {
+        this.destroyOverlay(id);
+        this.overlays.delete(id);
+        return;
+      }
+      this.hideOverlay(entry);
+    },
+
+    handleFocus: function(idPayload, target, trigger) {
+      const id = this.normalizeId(idPayload);
+      if (!id) {
+        return;
+      }
+      const entry = this.overlays.get(id);
+      if (!entry) {
+        return;
+      }
+      console.log('[overlay-manager] handleFocus', {id, target, trigger, visible: entry.visible, isForeground: entry.isForeground});
+      if (!entry.isForeground || !entry.visible) {
+        return;
+      }
+      if (entry.pluginElement && typeof entry.pluginElement.handleExternalFocusRequest === 'function') {
+        entry.pluginElement.handleExternalFocusRequest(target);
+      } else if (entry.pluginElement && typeof entry.pluginElement.focus === 'function') {
+        entry.pluginElement.focus();
+      } else {
+        this.editor.focus();
+      }
+    },
+
+    handleRedraw: function(events) {
+      if (!events || this.overlays.size === 0) {
+        return;
+      }
+      let needsRefresh = false;
+      for (const evt of events) {
+        if (!Array.isArray(evt)) {
+          continue;
+        }
+        const name = evt[0];
+        if (name === 'win_pos' || name === 'win_resize' || name === 'grid_resize' || name === 'win_viewport') {
+          needsRefresh = true;
+          break;
+        }
+      }
+      if (needsRefresh) {
+        this.refreshAllGeometry();
+      }
+    },
+
+    refreshAllGeometry: function() {
+      this.overlays.forEach(entry => {
+        if (entry.visible) {
+          this.refreshOverlay(entry, false);
+        }
+      });
+    },
+
+    createOverlay: function(id, pluginName, options) {
+      const entryEl = document.createElement('div');
+      entryEl.classList.add('overlay-entry');
+      entryEl.style.pointerEvents = 'auto';
+      const pluginEl = this.instantiatePlugin(pluginName);
+      if (!pluginEl) {
+        console.error('[overlay-manager] Unknown plugin', pluginName);
+        return null;
+      }
+      pluginEl.setAttribute('external-control', '');
+      pluginEl.setAttribute('overlay-mode', '');
+      pluginEl.externalControl = true;
+      pluginEl.overlayMode = true;
+      if (!pluginEl.editor) {
+        pluginEl.editor = this.editor;
+      }
+      if (typeof pluginEl.setOverlayOptions === 'function') {
+        pluginEl.setOverlayOptions(options || {});
+      } else {
+        this.applyOptionsToPlugin(pluginEl, options || {});
+      }
+      if (typeof pluginEl.setOverlayForeground === 'function') {
+        pluginEl.setOverlayForeground(true);
+      }
+      entryEl.appendChild(pluginEl);
+      this.$['overlay-root'].appendChild(entryEl);
+      const entry = {
+        id: id,
+        plugin: pluginName,
+        pluginElement: pluginEl,
+        container: entryEl,
+        options: options || {},
+        visible: false,
+        persistent: options && options.persistent === true,
+        rendered: false,
+      };
+      return entry;
+    },
+
+    replaceOverlayPlugin: function(entry, pluginName, options) {
+      if (entry.pluginElement && entry.pluginElement.parentElement) {
+        entry.pluginElement.parentElement.removeChild(entry.pluginElement);
+      }
+      const pluginEl = this.instantiatePlugin(pluginName);
+      if (!pluginEl) {
+        return;
+      }
+      pluginEl.setAttribute('external-control', '');
+      pluginEl.setAttribute('overlay-mode', '');
+      pluginEl.externalControl = true;
+      pluginEl.overlayMode = true;
+      pluginEl.editor = this.editor;
+      if (typeof pluginEl.setOverlayOptions === 'function') {
+        pluginEl.setOverlayOptions(options || {});
+      } else {
+        this.applyOptionsToPlugin(pluginEl, options || {});
+      }
+      entry.container.appendChild(pluginEl);
+      entry.plugin = pluginName;
+      entry.pluginElement = pluginEl;
+    },
+
+    instantiatePlugin: function(pluginName) {
+      try {
+        return document.createElement(pluginName);
+      } catch (e) {
+        console.error('[overlay-manager] Failed to create plugin element', pluginName, e);
+        return null;
+      }
+    },
+
+    applyOptionsToPlugin: function(pluginEl, options) {
+      if (!options) {
+        return;
+      }
+      Object.keys(options).forEach(key => {
+        const value = options[key];
+        if (value === undefined) {
+          return;
+        }
+        if (key in pluginEl) {
+          pluginEl[key] = value;
+        } else {
+          pluginEl.setAttribute(key, value);
+        }
+      });
+    },
+
+    showOverlay: function(entry, payload) {
+      entry.visible = true;
+      entry.container.style.display = 'block';
+      entry.container.style.pointerEvents = 'auto';
+      entry.rendered = false;
+      if (entry.pluginElement && typeof entry.pluginElement.open === 'function') {
+        if (payload && payload.options && payload.options.url !== undefined) {
+          entry.pluginElement.open(payload.options.url, payload.options.focus !== false);
+        } else if (entry.pluginElement.visible === false && typeof entry.pluginElement.show === 'function') {
+          entry.pluginElement.show(payload && payload.options ? payload.options.focus !== false : true);
+        }
+      }
+      if (typeof entry.pluginElement.setOverlayOptions === 'function') {
+        entry.pluginElement.setOverlayOptions(entry.options || {});
+      }
+      this.refreshOverlay(entry, true);
+      if (payload && payload.options && payload.options.focus === true && typeof entry.pluginElement.focusBrowser === 'function') {
+        entry.pluginElement.focusBrowser();
+      }
+    },
+
+    hideOverlay: function(entry) {
+      entry.visible = false;
+      entry.container.style.display = 'none';
+      entry.container.style.pointerEvents = 'none';
+      entry.rendered = false;
+      if (entry.pluginElement && typeof entry.pluginElement.close === 'function') {
+        entry.pluginElement.close();
+      }
+      this.setOverlayForeground(entry, false);
+    },
+
+    destroyOverlay: function(id) {
+      const entry = typeof id === 'object' ? id : this.overlays.get(id);
+      if (!entry) {
+        return;
+      }
+      this.setOverlayForeground(entry, false);
+      if (entry.pluginElement && entry.pluginElement.parentElement) {
+        entry.pluginElement.parentElement.removeChild(entry.pluginElement);
+      }
+      if (entry.container && entry.container.parentElement) {
+        entry.container.parentElement.removeChild(entry.container);
+      }
+    },
+
+    refreshOverlay: function(entry) {
+      if (!entry || !entry.visible) {
+        return;
+      }
+      const options = entry.options || {};
+      this.resolveTargetWindow(entry).then(resolved => {
+        if (!resolved) {
+          this.handleMissingWindow(entry);
+          return;
+        }
+        const {winId, isCurrentTab} = resolved;
+        if (!isCurrentTab) {
+          this.temporarilyHideOverlay(entry);
+          return;
+        }
+        const request = this.buildWindowGeometryRequest(winId);
+        this.client.eval(request).then(result => {
+          const geometry = this.parseWindowGeometryResult(result);
+          if (!geometry) {
+            return;
+          }
+          this.positionOverlay(entry, geometry, options);
+        }).catch(err => {
+          console.error('[overlay-manager] Failed to eval geometry', err, request);
+        });
+      }).catch(err => {
+        console.error('[overlay-manager] Failed to resolve window', err);
+        this.handleMissingWindow(entry);
+      });
+    },
+
+    resolveTargetWindow: function(entry) {
+      const options = entry.options || {};
+      const winId = options.targetWin || options.winid || null;
+      const buffer = options.buffer || options.bufnr || null;
+
+      if (winId) {
+        return this.validateWindow(winId).then(validation => {
+          if (!validation || !validation.exists) {
+            if (buffer !== null) {
+              return this.findWindowForBuffer(buffer).then(newWin => {
+                if (newWin) {
+                  entry.options.targetWin = newWin;
+                  return {winId: newWin, isCurrentTab: true};
+                }
+                return null;
+              });
+            }
+            return null;
+          }
+          if (validation.isCurrentTab) {
+            return {winId, isCurrentTab: true};
+          }
+          if (buffer !== null) {
+            return this.findWindowForBuffer(buffer).then(newWin => {
+              if (newWin) {
+                entry.options.targetWin = newWin;
+                return {winId: newWin, isCurrentTab: true};
+              }
+              return {winId, isCurrentTab: false};
+            });
+          }
+          return {winId, isCurrentTab: false};
+        });
+      }
+
+      if (buffer !== null) {
+        return this.findWindowForBuffer(buffer).then(newWin => {
+          if (newWin) {
+            entry.options.targetWin = newWin;
+            return {winId: newWin, isCurrentTab: true};
+          }
+          return null;
+        });
+      }
+
+      return Promise.resolve({winId: null, isCurrentTab: true});
+    },
+
+    validateWindow: function(winId) {
+      const request = this.buildWindowValidationRequest(winId);
+      return this.client.eval(request).then(result => this.parseWindowValidationResult(result));
+    },
+
+    findWindowForBuffer: function(buffer) {
+      const expr = `[bufwinnr(${buffer}), tabpagenr()]`;
+      return this.client.eval(expr).then(res => {
+        if (!Array.isArray(res) || res.length < 2) {
+          return null;
+        }
+        const winNr = Number(res[0]);
+        const tabNr = Number(res[1]);
+        if (Number.isNaN(winNr) || winNr <= 0) {
+          return null;
+        }
+        const idExpr = `win_getid(${winNr}, ${tabNr})`;
+        return this.client.eval(idExpr).then(id => {
+          const newId = Number(id);
+          return Number.isNaN(newId) || newId <= 0 ? null : newId;
+        });
+      });
+    },
+
+    buildWindowValidationRequest: function(winId) {
+      return `[win_id2win(${winId}), win_id2tabwin(${winId}), tabpagenr()]`;
+    },
+
+    parseWindowValidationResult: function(result) {
+      if (!Array.isArray(result) || result.length < 3) {
+        return null;
+      }
+      const winIdx = Number(result[0]);
+      const tabWin = Array.isArray(result[1]) ? result[1] : [];
+      const currentTab = Number(result[2]);
+      const targetTab = tabWin.length >= 1 ? Number(tabWin[0]) : 0;
+      return {
+        exists: !Number.isNaN(winIdx) && winIdx > 0,
+        isCurrentTab: targetTab === currentTab,
+      };
+    },
+
+    temporarilyHideOverlay: function(entry) {
+      entry.container.style.display = 'none';
+      entry.container.style.pointerEvents = 'none';
+      entry.rendered = false;
+      this.setOverlayForeground(entry, false);
+    },
+
+    handleMissingWindow: function(entry) {
+      if (!entry) {
+        return;
+      }
+      if (entry.options && entry.options.buffer !== undefined) {
+        this.temporarilyHideOverlay(entry);
+        return;
+      }
+      if (entry.persistent) {
+        this.temporarilyHideOverlay(entry);
+      } else {
+        this.hideOverlay(entry);
+        this.destroyOverlay(entry.id);
+        this.overlays.delete(entry.id);
+      }
+    },
+
+    buildWindowGeometryRequest: function(winId) {
+      if (winId) {
+        return `[winwidth(${winId}), winheight(${winId}), win_screenpos(${winId})]`;
+      }
+      return '[winwidth(0), winheight(0), win_screenpos(0)]';
+    },
+
+    parseWindowGeometryResult: function(result) {
+      if (!Array.isArray(result) || result.length < 3) {
+        return null;
+      }
+      const widthCols = Number(result[0]);
+      const heightRows = Number(result[1]);
+      const pos = Array.isArray(result[2]) ? result[2] : [1, 1];
+      if (Number.isNaN(widthCols) || Number.isNaN(heightRows)) {
+        return null;
+      }
+      const row = Number(pos[0] || 1);
+      const col = Number(pos[1] || 1);
+      const metrics = this.getCharMetrics();
+      return {
+        width: Math.max(0, Math.round(widthCols * metrics.width)),
+        height: Math.max(0, Math.round(heightRows * metrics.height)),
+        top: Math.round((row - 1) * metrics.height),
+        left: Math.round((col - 1) * metrics.width),
+      };
+    },
+
+    positionOverlay: function(entry, geometry, options) {
+      const height = geometry.height;
+      entry.container.style.left = geometry.left + 'px';
+      entry.container.style.top = geometry.top + 'px';
+      entry.container.style.width = geometry.width + 'px';
+      entry.container.style.height = Math.max(0, height) + 'px';
+      entry.container.style.display = 'block';
+      entry.container.style.pointerEvents = 'auto';
+      entry.rendered = true;
+      this.setOverlayForeground(entry, true);
+    },
+
+    setOverlayForeground: function(entry, foreground) {
+      entry.isForeground = !!foreground;
+      if (entry.pluginElement && typeof entry.pluginElement.setOverlayForeground === 'function') {
+        console.log('[overlay-manager] setOverlayForeground', entry.id, entry.isForeground);
+        entry.pluginElement.setOverlayForeground(entry.isForeground);
+      }
+    },
+
+    getCharMetrics: function() {
+      if (this.charMetrics) {
+        return this.charMetrics;
+      }
+      const screen = this.editor && this.editor.screen;
+      const attrs = screen && screen.store && screen.store.font_attr;
+      let width = 8;
+      let height = 16;
+      if (attrs) {
+        const ratio = window.devicePixelRatio || 1;
+        width = (attrs.draw_width || attrs.width || width) / ratio;
+        height = (attrs.draw_height || attrs.height || height) / ratio;
+      }
+      this.charMetrics = {width, height};
+      return this.charMetrics;
+    },
+
+    normalizeId: function(id) {
+      if (id === undefined || id === null) {
+        return null;
+      }
+      if (typeof id === 'number') {
+        return String(id);
+      }
+      if (typeof id === 'string') {
+        return id;
+      }
+      return null;
+    }
+  });
+})();
+</script>
