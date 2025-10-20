@@ -99,6 +99,8 @@
       this.activeTarget = 'editor';
       this.isForeground = true;
       this.windowKeyHandler = null;
+      this.lastReportedFocus = null;
+      this.documentMouseDownHandler = null;
       const {shell} = require('electron');
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
@@ -126,6 +128,31 @@
       this.browser.addEventListener('ipc-message', e => {
         if (e.channel === 'mini-browser:toggle') {
           this.handleExternalFocusRequest('toggle');
+          return;
+        }
+        if (e.channel === 'mini-browser:ctrl-w') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          if (this.client && typeof this.client.input === 'function') {
+            this.client
+              .input('<C-w>')
+              .catch(err => console.error('[mini-browser] forward ctrl-w failed', err));
+          }
+          setTimeout(() => this.focusEditor(), 0);
+          return;
+        }
+        if (e.channel === 'mini-browser:focus') {
+          const focused = !!(e.args && e.args[0]);
+          if (focused) {
+            if (this.activeTarget !== 'browser') {
+              this.activeTarget = 'browser';
+              this.notifyFocusState('browser');
+            }
+          } else if (this.activeTarget !== 'editor') {
+            this.activeTarget = 'editor';
+            this.notifyFocusState('editor');
+          }
         }
       });
       this.browser.addEventListener('did-fail-load', e => {
@@ -142,18 +169,42 @@
       });
       this.browser.addEventListener('focus', () => {
         this.activeTarget = 'browser';
+        this.notifyFocusState('browser');
       });
       this.browser.addEventListener('blur', () => {
         if (this.activeTarget === 'browser') {
           this.activeTarget = 'editor';
+          this.notifyFocusState('editor');
         }
       });
+      this.documentMouseDownHandler = event => {
+        if (!this.isForeground) {
+          return;
+        }
+        const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        const insideBrowser =
+          path.includes(this.browser) ||
+          (this.body && (path.includes(this.body) || this.body.contains(event.target)));
+        console.debug('[mini-browser] mousedown', {
+          insideBrowser,
+          target: event.target && event.target.tagName,
+          activeTarget: this.activeTarget,
+        });
+        if (insideBrowser) {
+          this.focusBrowser();
+        } else if (this.activeTarget !== 'editor') {
+          this.activeTarget = 'editor';
+          this.notifyFocusState('editor');
+        }
+      };
+      document.addEventListener('mousedown', this.documentMouseDownHandler, true);
       this.browser.addEventListener('before-input-event', e => {
         if (!this.isForeground) {
           return;
         }
         const key = e.key ? e.key.toLowerCase() : '';
-        if ((e.ctrlKey || e.metaKey) && key === ']') {
+        const code = e.code || '';
+        if ((e.ctrlKey || e.metaKey) && (key === ']' || code === 'BracketRight')) {
           e.preventDefault();
           if (typeof e.stopPropagation === 'function') {
             e.stopPropagation();
@@ -161,7 +212,7 @@
           this.sendToggleCommand();
           return;
         }
-        if ((e.ctrlKey || e.metaKey) && key === 'w') {
+        if ((e.ctrlKey || e.metaKey) && (key === 'w' || code === 'KeyW')) {
           if (this.activeTarget !== 'browser') {
             return;
           }
@@ -182,12 +233,13 @@
           return;
         }
         const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
-        if ((e.ctrlKey || e.metaKey) && key === ']') {
+        const code = e.code || '';
+        if ((e.ctrlKey || e.metaKey) && (key === ']' || code === 'BracketRight')) {
           e.preventDefault();
           this.sendToggleCommand();
           return;
         }
-        if ((e.ctrlKey || e.metaKey) && key === 'w') {
+        if ((e.ctrlKey || e.metaKey) && (key === 'w' || code === 'KeyW')) {
           if (this.activeTarget !== 'browser') {
             return;
           }
@@ -264,6 +316,10 @@
       if (this.windowKeyHandler) {
         window.removeEventListener('keydown', this.windowKeyHandler, true);
         this.windowKeyHandler = null;
+      }
+      if (this.documentMouseDownHandler) {
+        document.removeEventListener('mousedown', this.documentMouseDownHandler, true);
+        this.documentMouseDownHandler = null;
       }
       if (this.externalControl) {
         if (this.pendingWindowMetrics) {
@@ -488,8 +544,16 @@
         return;
       }
       const focusState = state === 'browser' ? 'browser' : 'editor';
+      if (this.lastReportedFocus === focusState) {
+        return;
+      }
       const command = `call MiniBrowserNotifyFocus(${bufferId}, '${focusState}')`;
-      this.client.command(command).catch(err => console.error('[mini-browser] notify focus failed', err));
+      this.client
+        .command(command)
+        .then(() => {
+          this.lastReportedFocus = focusState;
+        })
+        .catch(err => console.error('[mini-browser] notify focus failed', err));
     },
 
     handleExternalFocusRequest(target) {
@@ -632,6 +696,10 @@
         this.activeTarget = 'editor';
         this.isForeground = false;
         this.notifyFocusState('editor');
+      }
+      if (this.documentMouseDownHandler) {
+        document.removeEventListener('mousedown', this.documentMouseDownHandler, true);
+        this.documentMouseDownHandler = null;
       }
     },
 
