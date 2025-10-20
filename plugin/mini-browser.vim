@@ -65,12 +65,60 @@ function! MiniBrowserOpen(bang, ...) abort
         call add(legacy_args, 0)
     endif
     call call('rpcnotify', legacy_args)
+
+    if !exists('g:nyaovim_mini_browser_instances')
+        let g:nyaovim_mini_browser_instances = {}
+    endif
+    let prev = get(g:nyaovim_mini_browser_instances, overlay_id, {})
+    let entry = {
+                \ 'buffer': buffer,
+                \ 'winid': target,
+                \ 'url': has_url ? a:1 : get(prev, 'url', ''),
+                \ 'prev_statusline': get(prev, 'prev_statusline', getbufvar(buffer, '&statusline')),
+                \ 'focus': focus ? 'browser' : get(prev, 'focus', 'editor'),
+                \ }
+    if has_url
+        let entry.url = a:1
+    endif
+    let g:nyaovim_mini_browser_instances[overlay_id] = entry
+
+    let b:minibrowser_overlay_id = overlay_id
+    execute 'autocmd! nyaovim_mini_browser BufWipeout <buffer=' . buffer . '>'
+    execute 'autocmd nyaovim_mini_browser BufWipeout <buffer=' . buffer . '> call MiniBrowserClose(' . overlay_id . ')'
+
+    call MiniBrowserNotifyFocus(buffer, focus ? 'browser' : 'editor')
 endfunction
 
 function! MiniBrowserClose(...) abort
-    let overlay_id = a:0 >= 1 ? s:normalize_overlay_id(a:1) : s:current_overlay_id()
+    let overlay_id = a:0 >= 1 ? s:normalize_overlay_id(a:1) : (exists('b:minibrowser_overlay_id') ? b:minibrowser_overlay_id : s:current_overlay_id())
     call s:rpc_notify('overlay:close', {'id': overlay_id, 'trigger': 'command-close'})
     call rpcnotify(0, 'mini-browser:close')
+    if exists('b:minibrowser_overlay_id') && b:minibrowser_overlay_id ==# overlay_id
+        unlet b:minibrowser_overlay_id
+    endif
+    if exists('g:nyaovim_mini_browser_instances') && has_key(g:nyaovim_mini_browser_instances, overlay_id)
+        let info = g:nyaovim_mini_browser_instances[overlay_id]
+        if has_key(info, 'prev_statusline')
+            call setbufvar(info.buffer, '&statusline', info.prev_statusline)
+        endif
+        call remove(g:nyaovim_mini_browser_instances, overlay_id)
+    endif
+    silent! redrawstatus
+endfunction
+
+function! MiniBrowserList() abort
+    if !exists('g:nyaovim_mini_browser_instances') || empty(g:nyaovim_mini_browser_instances)
+        echo 'No mini-browser instances'
+        return
+    endif
+    let lines = [' ID    FOCUS   URL']
+    for [bufnr, info] in sort(items(g:nyaovim_mini_browser_instances))
+        let mark = getbufvar(bufnr, '&modified') ? ' [+]' : ''
+        let url = get(info, 'url', '')
+        let focus = toupper(get(info, 'focus', 'editor'))
+        call add(lines, printf('%-6d %-7s %s%s', bufnr, focus, url, mark))
+    endfor
+    echo join(lines, "\n")
 endfunction
 
 function! MiniBrowserFocusCommand(target, ...) abort
@@ -83,11 +131,37 @@ function! MiniBrowserFocusCommand(target, ...) abort
     call rpcnotify(0, 'mini-browser:focus', focus_target)
 endfunction
 
+function! MiniBrowserNotifyFocus(bufnr, state) abort
+    if !exists('g:nyaovim_mini_browser_instances')
+        let g:nyaovim_mini_browser_instances = {}
+    endif
+    if !bufexists(a:bufnr)
+        return
+    endif
+    let focus = a:state ==# 'browser' ? 'browser' : 'editor'
+    if !has_key(g:nyaovim_mini_browser_instances, a:bufnr)
+        return
+    endif
+    let g:nyaovim_mini_browser_instances[a:bufnr].focus = focus
+    let base = get(g:nyaovim_mini_browser_instances[a:bufnr], 'prev_statusline', getbufvar(a:bufnr, '&statusline'))
+    let base = substitute(base, '\s\+MiniBrowserFocus:\w\+$', '', '')
+    let base = substitute(base, '\s\+$', '', '')
+    let status = base . ' ' . focus
+    call setbufvar(a:bufnr, '&statusline', status)
+    silent! redrawstatus
+endfunction
+
 command! -nargs=* -bang MiniBrowser call MiniBrowserOpen(<bang>0, <f-args>)
 command! -nargs=? MiniBrowserClose call MiniBrowserClose(<f-args>)
 command! -nargs=? MiniBrowserFocus call MiniBrowserFocusCommand('toggle', <f-args>)
 command! -nargs=? MiniBrowserFocusEditor call MiniBrowserFocusCommand('editor', <f-args>)
 command! -nargs=? MiniBrowserFocusBrowser call MiniBrowserFocusCommand('browser', <f-args>)
 command! -nargs=? MiniBrowserToggleFocus call MiniBrowserFocusCommand('toggle', <f-args>)
+command! MiniBrowserList call MiniBrowserList()
+command! -nargs=+ MiniBrowserFocusState call MiniBrowserNotifyFocus(<f-args>)
+
+augroup nyaovim_mini_browser
+    autocmd!
+augroup END
 
 let g:loaded_nyaovim_mini_browser = 1

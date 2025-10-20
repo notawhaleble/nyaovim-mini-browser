@@ -22,7 +22,7 @@
     </style>
 
     <div id="mini-browser-body">
-      <webview id="mini-browser-view"></webview>
+      <webview id="mini-browser-view" allowpopups></webview>
     </div>
   </template>
 </dom-module>
@@ -99,6 +99,7 @@
       this.activeTarget = 'editor';
       this.isForeground = true;
       this.windowKeyHandler = null;
+      const {shell} = require('electron');
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
       this.browser.setAttribute('preload', preloadUrl);
@@ -130,6 +131,15 @@
       this.browser.addEventListener('did-fail-load', e => {
         console.error('[mini-browser] did-fail-load', e);
       });
+      this.browser.addEventListener('new-window', e => {
+        if (!e || !e.url) {
+          return;
+        }
+        e.preventDefault();
+        Promise.resolve(shell.openExternal(e.url)).catch(err => {
+          console.error('[mini-browser] failed to open external url', e.url, err);
+        });
+      });
       this.browser.addEventListener('focus', () => {
         this.activeTarget = 'browser';
       });
@@ -139,14 +149,32 @@
         }
       });
       this.browser.addEventListener('before-input-event', e => {
+        if (!this.isForeground) {
+          return;
+        }
         const key = e.key ? e.key.toLowerCase() : '';
-        console.log('[mini-browser] before-input-event', {overlayId: this.overlayId, key, ctrl: e.ctrlKey, isForeground: this.isForeground});
-        if (this.isForeground && e.ctrlKey && key === ']') {
+        if ((e.ctrlKey || e.metaKey) && key === ']') {
           e.preventDefault();
           if (typeof e.stopPropagation === 'function') {
             e.stopPropagation();
           }
           this.sendToggleCommand();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && key === 'w') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          if (this.client && typeof this.client.input === 'function') {
+            this.client.input('<C-w>').catch(err => console.error('[mini-browser] forward ctrl-w failed', err));
+          }
+          // FIXME: this handoff still leaves edge-cases (e.g. chord timing)
+          setTimeout(() => this.focusEditor(), 0);
         }
       });
       this.body.addEventListener('keydown', e => {
@@ -154,94 +182,48 @@
           return;
         }
         const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
-        switch (key) {
-          case 'j':
-            this.browser.executeJavaScript(
-              `(function(){
-                var n = document.activeElement.tagName;
-                if (n != "INPUT" && n != "SELECT" && n != "TEXTAREA") {
-                  window.scrollBy(0, window.innerHeight / 2);
-                }
-              })()`
-            );
-            break;
-          case 'k':
-            this.browser.executeJavaScript(
-              `(function(){
-                var n = document.activeElement.tagName;
-                if (n != "INPUT" && n != "SELECT" && n != "TEXTAREA") {
-                  window.scrollBy(0, -window.innerHeight / 2);
-                }
-              })()`
-            );
-            break;
-          case 'h':
-            this.browser.executeJavaScript(
-              `(function(){
-                var n = document.activeElement.tagName;
-                if (n != "INPUT" && n != "SELECT" && n != "TEXTAREA") {
-                  window.scrollBy(-window.innerHeight / 2, 0);
-                }
-              })()`
-            );
-            break;
-          case 'l':
-            this.browser.executeJavaScript(
-              `(function(){
-                var n = document.activeElement.tagName;
-                if (n != "INPUT" && n != "SELECT" && n != "TEXTAREA") {
-                  window.scrollBy(window.innerHeight / 2, 0);
-                }
-              })()`
-            );
-            break;
-          case 'x':
-            if (e.ctrlKey) {
-              this.close();
-            }
-            break;
-          case 'f':
-            if (e.ctrlKey && e.shiftKey) {
-              this.browser.goForward();
-            }
-            break;
-          case 'b':
-            if (e.ctrlKey && e.shiftKey) {
-              this.browser.goBack();
-            }
-            break;
-          case 'r':
-            if (e.ctrlKey) {
-              this.browser.reload();
-            }
-            break;
-          case 'i':
-            if (e.ctrlKey && e.shiftKey) {
-              this.browser.openDevTools();
-            }
-            break;
-          case ']':
-            if (e.ctrlKey) {
-              e.preventDefault();
-              this.sendToggleCommand();
-            }
-            break;
-          default:
-            break;
+        if ((e.ctrlKey || e.metaKey) && key === ']') {
+          e.preventDefault();
+          this.sendToggleCommand();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && key === 'w') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          // FIXME: minimal implementation; revisit timing if chord issues appear
+          setTimeout(() => this.focusEditor(), 0);
         }
       });
       this.windowKeyHandler = e => {
-        if (!this.visible || !this.isForeground || this.offsetParent === null || !e.ctrlKey) {
+        if (!this.visible || !this.isForeground || this.offsetParent === null || !(e.ctrlKey || e.metaKey)) {
           return;
         }
         const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
-        console.log('[mini-browser] window keydown', {overlayId: this.overlayId, key, ctrl: e.ctrlKey, isForeground: this.isForeground});
         if (key === ']') {
           e.preventDefault();
           if (typeof e.stopPropagation === 'function') {
             e.stopPropagation();
           }
           this.sendToggleCommand();
+          return;
+        }
+        if (key === 'w') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          // FIXME: minimal Ctrl+W forwarding; editor focus may still flicker
+          setTimeout(() => this.focusEditor(), 0);
         }
       };
       window.addEventListener('keydown', this.windowKeyHandler, true);
@@ -486,6 +468,7 @@
         }, 0);
       }
       this.activeTarget = 'browser';
+      this.notifyFocusState('browser');
     },
 
     focusEditor() {
@@ -493,6 +476,20 @@
         this.editor.focus();
       }
       this.activeTarget = 'editor';
+      this.notifyFocusState('editor');
+    },
+
+    notifyFocusState(state) {
+      if (!this.client) {
+        return;
+      }
+      const bufferId = Number(this.overlayId || this.editor?.buffer?.id || NaN);
+      if (!Number.isFinite(bufferId)) {
+        return;
+      }
+      const focusState = state === 'browser' ? 'browser' : 'editor';
+      const command = `call MiniBrowserNotifyFocus(${bufferId}, '${focusState}')`;
+      this.client.command(command).catch(err => console.error('[mini-browser] notify focus failed', err));
     },
 
     handleExternalFocusRequest(target) {
@@ -572,6 +569,10 @@
       this.isForeground = !!foreground;
       if (!this.isForeground && this.activeTarget === 'browser') {
         this.focusEditor();
+      } else if (this.isForeground) {
+        this.notifyFocusState(this.activeTarget === 'browser' ? 'browser' : 'editor');
+      } else {
+        this.notifyFocusState('editor');
       }
     },
 
@@ -594,8 +595,10 @@
           this.body.focus();
         }
         this.activeTarget = 'browser';
+        this.notifyFocusState('browser');
       } else {
         this.activeTarget = 'editor';
+        this.notifyFocusState('editor');
       }
     },
 
@@ -628,6 +631,7 @@
         this.editor.focus();
         this.activeTarget = 'editor';
         this.isForeground = false;
+        this.notifyFocusState('editor');
       }
     },
 
