@@ -338,6 +338,13 @@
         return;
       }
       this.setOverlayForeground(entry, false);
+      if (entry.pluginElement && typeof entry.pluginElement.close === 'function') {
+        try {
+          entry.pluginElement.close();
+        } catch (err) {
+          console.error('[overlay-manager] failed to close plugin before destroy', err);
+        }
+      }
       if (entry.pluginElement && entry.pluginElement.parentElement) {
         entry.pluginElement.parentElement.removeChild(entry.pluginElement);
       }

@@ -91,7 +91,7 @@ endfunction
 
 function! MiniBrowserClose(...) abort
     let overlay_id = a:0 >= 1 ? s:normalize_overlay_id(a:1) : (exists('b:minibrowser_overlay_id') ? b:minibrowser_overlay_id : s:current_overlay_id())
-    call s:rpc_notify('overlay:close', {'id': overlay_id, 'trigger': 'command-close'})
+    call s:rpc_notify('overlay:close', {'id': overlay_id, 'trigger': 'command-close', 'destroy': v:true})
     call rpcnotify(0, 'mini-browser:close')
     if exists('b:minibrowser_overlay_id') && b:minibrowser_overlay_id ==# overlay_id
         unlet b:minibrowser_overlay_id
