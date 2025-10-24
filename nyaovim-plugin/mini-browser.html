@@ -167,6 +167,30 @@
           console.error('[mini-browser] failed to open external url', e.url, err);
         });
       });
+      this.browser.addEventListener('permissionrequest', event => {
+        if (!event || !event.request) {
+          return;
+        }
+        const permission = (event.permission || '').toLowerCase();
+        if (permission === 'display-capture') {
+          console.log('[mini-browser] allowing display capture', event.details);
+          event.request.allow();
+          return;
+        }
+        if (permission === 'media') {
+          const media = event.details && event.details.mediaTypes;
+          const wantsVideo =
+            media &&
+            (media.video === true ||
+              media.video === 'screen' ||
+              media.video === 'window' ||
+              media.video === 'tab');
+          if (wantsVideo) {
+            console.log('[mini-browser] allowing media capture', media);
+            event.request.allow();
+          }
+        }
+      });
       this.browser.addEventListener('focus', () => {
         this.activeTarget = 'browser';
         this.notifyFocusState('browser');
