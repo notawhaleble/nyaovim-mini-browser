@@ -107,7 +107,11 @@
       this.browser.setAttribute('preload', preloadUrl);
       this.applyLayout();
       const ua = this.useragent || (typeof navigator !== 'undefined' ? navigator.userAgent : '');
-      this.browser.setAttribute('useragent', ua);
+      if (typeof this.browser.setUserAgentOverride === 'function') {
+        this.browser.setUserAgentOverride(ua);
+      } else {
+        this.browser.setAttribute('useragent', ua);
+      }
       this.browser.useragent = ua;
       this.browser.src = this.url;
       this.browser.addEventListener('dom-ready', () => {
@@ -126,6 +130,11 @@
         this.browser.send('mini-browser:set-overlay-id', this.overlayId);
       });
       this.browser.addEventListener('ipc-message', e => {
+        if (e.channel === 'mini-browser:notification') {
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          this.handleBrowserNotification(payload);
+          return;
+        }
         if (e.channel === 'mini-browser:toggle') {
           this.handleExternalFocusRequest('toggle');
           return;
@@ -557,6 +566,77 @@
       }
       this.activeTarget = 'editor';
       this.notifyFocusState('editor');
+    },
+
+    handleBrowserNotification(payload) {
+      if (!this.client) {
+        return;
+      }
+      const data = payload && typeof payload === 'object' ? payload : {};
+      const title = typeof data.title === 'string' ? data.title : '';
+      const body = typeof data.body === 'string' ? data.body : '';
+      const explicitMessage = typeof data.message === 'string' ? data.message : '';
+      const message =
+        explicitMessage ||
+        (title && body ? `${title}: ${body}` : title || body || '[mini-browser] Received notification');
+      const level = Number.isFinite(Number(data.level)) ? Number(data.level) : 2;
+      const options = {
+        title: title || 'Mini Browser',
+      };
+      if (typeof data.icon === 'string' && data.icon) {
+        options.icon = data.icon;
+      }
+      if (typeof data.tag === 'string' && data.tag) {
+        const overlayTag = this.overlayId !== undefined && this.overlayId !== null ? String(this.overlayId) : '';
+        options.replace = overlayTag ? `${overlayTag}:${data.tag}` : data.tag;
+      }
+      if (data.requireInteraction === true) {
+        options.timeout = 0;
+      } else if (Number.isFinite(Number(data.timeout))) {
+        const timeout = Number(data.timeout);
+        if (timeout >= 0) {
+          options.timeout = timeout;
+        }
+      }
+      this.sendVimNotification(message, level, options);
+    },
+
+    sendVimNotification(message, logLevel, opts) {
+      if (!this.client) {
+        return;
+      }
+      const level = Number.isFinite(Number(logLevel)) ? Number(logLevel) : 2;
+      const options = Object.assign({title: 'Mini Browser'}, opts || {});
+      if (typeof this.client.request === 'function') {
+        this.client
+          .request('nvim_notify', [String(message), level, options])
+          .catch(err => {
+            console.warn('[mini-browser] nvim_notify failed, falling back to echomsg', err);
+            this.showNotificationFallback(message, level, options);
+          });
+        return;
+      }
+      this.showNotificationFallback(message, level, options);
+    },
+
+    showNotificationFallback(message, logLevel, opts) {
+      if (!this.client || typeof this.client.command !== 'function') {
+        return;
+      }
+      const level = Number.isFinite(Number(logLevel)) ? Number(logLevel) : 2;
+      const highlight = level >= 4 ? 'ErrorMsg' : level >= 3 ? 'WarningMsg' : '';
+      const expr = JSON.stringify(String(message));
+      const parts = [];
+      if (highlight) {
+        parts.push(`echohl ${highlight}`);
+      }
+      parts.push(`echomsg ${expr}`);
+      if (highlight) {
+        parts.push('echohl None');
+      }
+      this.client.command(parts.join(' | ')).catch(err => {
+        console.error('[mini-browser] fallback notification failed', err, {message, opts});
+      });
     },
 
     notifyFocusState(state) {

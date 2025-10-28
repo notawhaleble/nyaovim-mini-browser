@@ -1,5 +1,81 @@
 const {ipcRenderer} = require('electron');
 
+let overlayId = null;
+
+ipcRenderer.on('mini-browser:set-overlay-id', (_event, id) => {
+  overlayId = id;
+});
+
+function forwardBrowserNotification(title, options) {
+  const payload = {
+    overlayId,
+    title: typeof title === 'string' ? title : '',
+    body: options && typeof options.body === 'string' ? options.body : '',
+    tag: options && typeof options.tag === 'string' ? options.tag : undefined,
+    icon: options && typeof options.icon === 'string' ? options.icon : undefined,
+    silent: options ? !!options.silent : undefined,
+    renotify: options ? !!options.renotify : undefined,
+    requireInteraction: options ? !!options.requireInteraction : undefined,
+    timestamp: Date.now(),
+  };
+  if (options && options.data !== undefined) {
+    try {
+      payload.data = JSON.parse(JSON.stringify(options.data));
+    } catch (_err) {
+      payload.data = undefined;
+    }
+  }
+  ipcRenderer.sendToHost('mini-browser:notification', payload);
+}
+
+const NativeNotification = typeof window !== 'undefined' ? window.Notification : null;
+
+if (typeof NativeNotification === 'function') {
+  const NotificationProxy = function NotificationProxy(title, options) {
+    const instance = Reflect.construct(
+      NativeNotification,
+      [title, options],
+      new.target || NotificationProxy,
+    );
+    try {
+      forwardBrowserNotification(title, options || {});
+    } catch (err) {
+      console.error('[mini-browser] forwarding notification failed', err);
+    }
+    return instance;
+  };
+
+  NotificationProxy.prototype = NativeNotification.prototype;
+  Object.defineProperty(NotificationProxy.prototype, 'constructor', {
+    value: NotificationProxy,
+    writable: true,
+    configurable: true,
+  });
+  Object.setPrototypeOf(NotificationProxy, NativeNotification);
+
+  Object.defineProperty(NotificationProxy, 'permission', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return NativeNotification.permission;
+    },
+  });
+
+  Object.defineProperty(NotificationProxy, 'maxActions', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return NativeNotification.maxActions;
+    },
+  });
+
+  NotificationProxy.requestPermission = NativeNotification.requestPermission
+    ? NativeNotification.requestPermission.bind(NativeNotification)
+    : undefined;
+
+  window.Notification = NotificationProxy;
+}
+
 window.addEventListener(
   'keydown',
   event => {
