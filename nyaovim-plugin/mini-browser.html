@@ -249,6 +249,11 @@
           event.request.allow();
           return;
         }
+        if (permission === 'notifications' || permission === 'notification') {
+          console.log('[mini-browser] allowing notifications permission');
+          event.request.allow();
+          return;
+        }
         if (permission === 'media') {
           const media = event.details && event.details.mediaTypes;
           const wantsVideo =

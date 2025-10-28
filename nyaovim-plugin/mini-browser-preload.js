@@ -32,15 +32,24 @@ const NativeNotification = typeof window !== 'undefined' ? window.Notification :
 
 if (typeof NativeNotification === 'function') {
   const NotificationProxy = function NotificationProxy(title, options) {
-    const instance = Reflect.construct(
-      NativeNotification,
-      [title, options],
-      new.target || NotificationProxy,
-    );
+    let instance = null;
+    let error = null;
+    try {
+      instance = Reflect.construct(
+        NativeNotification,
+        [title, options],
+        new.target || NotificationProxy,
+      );
+    } catch (err) {
+      error = err;
+    }
     try {
       forwardBrowserNotification(title, options || {});
-    } catch (err) {
-      console.error('[mini-browser] forwarding notification failed', err);
+    } catch (forwardErr) {
+      console.error('[mini-browser] forwarding notification failed', forwardErr);
+    }
+    if (error) {
+      throw error;
     }
     return instance;
   };
