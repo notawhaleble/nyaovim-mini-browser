@@ -87,6 +87,41 @@ window.addEventListener(
       event.stopPropagation();
       return;
     }
+    if ((event.ctrlKey || event.metaKey) && (key === 'r' || code === 'KeyR')) {
+      ipcRenderer.sendToHost('mini-browser:reload', {
+        ignoreCache: !!event.shiftKey,
+      });
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === '+' || key === '=' || code === 'Equal' || code === 'NumpadAdd')) {
+      ipcRenderer.sendToHost('mini-browser:zoom-in');
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract')
+    ) {
+      ipcRenderer.sendToHost('mini-browser:zoom-out');
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === 'o' || code === 'KeyO')) {
+      ipcRenderer.sendToHost('mini-browser:history-back');
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (key === 'i' || code === 'KeyI')) {
+      ipcRenderer.sendToHost('mini-browser:history-forward');
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && (key === 'w' || code === 'KeyW')) {
       ipcRenderer.sendToHost('mini-browser:ctrl-w');
       event.preventDefault();
@@ -100,6 +135,29 @@ window.addEventListener('keyup', event => {
   const key = event.key ? event.key.toLowerCase() : '';
   const code = event.code || '';
   if ((event.ctrlKey || event.metaKey) && (key === ']' || code === 'BracketRight')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if ((event.ctrlKey || event.metaKey) && (key === 'r' || code === 'KeyR')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if ((event.ctrlKey || event.metaKey) && (key === '+' || key === '=' || code === 'Equal' || code === 'NumpadAdd')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (
+    (event.ctrlKey || event.metaKey) &&
+    (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract')
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if ((event.ctrlKey || event.metaKey) && (key === 'o' || code === 'KeyO')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if ((event.ctrlKey || event.metaKey) && (key === 'i' || code === 'KeyI')) {
     event.preventDefault();
     event.stopPropagation();
   }

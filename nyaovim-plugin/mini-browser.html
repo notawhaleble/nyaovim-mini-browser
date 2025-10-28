@@ -101,6 +101,10 @@
       this.windowKeyHandler = null;
       this.lastReportedFocus = null;
       this.documentMouseDownHandler = null;
+      this.zoomFactor = 1;
+      this.minZoomFactor = 0.25;
+      this.maxZoomFactor = 3;
+      this.zoomStep = 0.1;
       const {shell} = require('electron');
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
@@ -128,6 +132,27 @@
         this.browser.style.backgroundColor = computedBackground;
         this.body.style.backgroundColor = computedBackground;
         this.browser.send('mini-browser:set-overlay-id', this.overlayId);
+        if (typeof this.browser.getZoomFactor === 'function') {
+          try {
+            this.browser.getZoomFactor(factor => {
+              if (typeof factor === 'number' && !Number.isNaN(factor)) {
+                this.zoomFactor = factor;
+              }
+            });
+          } catch (err) {
+            console.warn('[mini-browser] getZoomFactor failed', err);
+          }
+        } else if (typeof this.browser.getZoomLevel === 'function') {
+          try {
+            this.browser.getZoomLevel(level => {
+              if (typeof level === 'number' && !Number.isNaN(level)) {
+                this.zoomFactor = this.zoomLevelToFactor(level);
+              }
+            });
+          } catch (err) {
+            console.warn('[mini-browser] getZoomLevel failed', err);
+          }
+        }
       });
       this.browser.addEventListener('ipc-message', e => {
         if (e.channel === 'mini-browser:notification') {
@@ -137,6 +162,16 @@
         }
         if (e.channel === 'mini-browser:toggle') {
           this.handleExternalFocusRequest('toggle');
+          return;
+        }
+        if (e.channel === 'mini-browser:reload') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          const ignoreCache =
+            payload && typeof payload === 'object' ? !!payload.ignoreCache : false;
+          this.reloadBrowser(ignoreCache);
           return;
         }
         if (e.channel === 'mini-browser:ctrl-w') {
@@ -149,6 +184,34 @@
               .catch(err => console.error('[mini-browser] forward ctrl-w failed', err));
           }
           setTimeout(() => this.focusEditor(), 0);
+          return;
+        }
+        if (e.channel === 'mini-browser:history-back') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          this.navigateBrowserHistory('back');
+          return;
+        }
+        if (e.channel === 'mini-browser:history-forward') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          this.navigateBrowserHistory('forward');
+          return;
+        }
+        if (e.channel === 'mini-browser:zoom-in') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          this.adjustZoom(1);
+          return;
+        }
+        if (e.channel === 'mini-browser:zoom-out') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          this.adjustZoom(-1);
           return;
         }
         if (e.channel === 'mini-browser:focus') {
@@ -235,6 +298,9 @@
         if (!this.isForeground) {
           return;
         }
+        if (this.handleZoomShortcut(e)) {
+          return;
+        }
         const key = e.key ? e.key.toLowerCase() : '';
         const code = e.code || '';
         if ((e.ctrlKey || e.metaKey) && (key === ']' || code === 'BracketRight')) {
@@ -243,6 +309,42 @@
             e.stopPropagation();
           }
           this.sendToggleCommand();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'r' || code === 'KeyR')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.reloadBrowser(!!e.shiftKey);
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'o' || code === 'KeyO')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('back');
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'i' || code === 'KeyI')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('forward');
           return;
         }
         if ((e.ctrlKey || e.metaKey) && (key === 'w' || code === 'KeyW')) {
@@ -265,11 +367,50 @@
         if (!this.isForeground) {
           return;
         }
+        if (this.handleZoomShortcut(e)) {
+          return;
+        }
         const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
         const code = e.code || '';
         if ((e.ctrlKey || e.metaKey) && (key === ']' || code === 'BracketRight')) {
           e.preventDefault();
           this.sendToggleCommand();
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'r' || code === 'KeyR')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.reloadBrowser(!!e.shiftKey);
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'o' || code === 'KeyO')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('back');
+          return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (key === 'i' || code === 'KeyI')) {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('forward');
           return;
         }
         if ((e.ctrlKey || e.metaKey) && (key === 'w' || code === 'KeyW')) {
@@ -286,7 +427,13 @@
         }
       });
       this.windowKeyHandler = e => {
-        if (!this.visible || !this.isForeground || this.offsetParent === null || !(e.ctrlKey || e.metaKey)) {
+        if (!this.visible || !this.isForeground || this.offsetParent === null) {
+          return;
+        }
+        if (this.handleZoomShortcut(e)) {
+          return;
+        }
+        if (!(e.ctrlKey || e.metaKey)) {
           return;
         }
         const key = e.key ? e.key.toLowerCase() : String.fromCharCode(e.keyCode).toLowerCase();
@@ -296,6 +443,42 @@
             e.stopPropagation();
           }
           this.sendToggleCommand();
+          return;
+        }
+        if (key === 'r') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.reloadBrowser(!!e.shiftKey);
+          return;
+        }
+        if (key === 'o') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('back');
+          return;
+        }
+        if (key === 'i') {
+          if (this.activeTarget !== 'browser') {
+            return;
+          }
+          e.preventDefault();
+          if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          e.returnValue = false;
+          this.navigateBrowserHistory('forward');
           return;
         }
         if (key === 'w') {
@@ -544,6 +727,154 @@
       return {width: 8, height: 16};
     },
 
+    reloadBrowser(ignoreCache) {
+      if (!this.browser) {
+        return;
+      }
+      const target = this.browser;
+      try {
+        if (ignoreCache && typeof target.reloadIgnoringCache === 'function') {
+          target.reloadIgnoringCache();
+          return;
+        }
+        if (typeof target.reload === 'function') {
+          target.reload();
+          return;
+        }
+        if (target.src) {
+          target.src = target.src;
+        }
+      } catch (err) {
+        console.error('[mini-browser] reload failed', err);
+      }
+    },
+
+    navigateBrowserHistory(direction) {
+      if (!this.browser) {
+        return;
+      }
+      const target = this.browser;
+      const goForward = direction === 'forward';
+      try {
+        if (goForward) {
+          if (typeof target.canGoForward === 'function' && !target.canGoForward()) {
+            return;
+          }
+          if (typeof target.goForward === 'function') {
+            target.goForward();
+          }
+          return;
+        }
+        if (typeof target.canGoBack === 'function' && !target.canGoBack()) {
+          return;
+        }
+        if (typeof target.goBack === 'function') {
+          target.goBack();
+        }
+      } catch (err) {
+        console.error('[mini-browser] history navigation failed', err, {direction});
+      }
+    },
+
+    handleZoomShortcut(event) {
+      if (!event || !this.browser || this.activeTarget !== 'browser' || !this.isForeground) {
+        return false;
+      }
+      const keyRaw = event.key !== undefined ? String(event.key) : '';
+      const key = keyRaw.toLowerCase();
+      const code = event.code || '';
+      const ctrlOrMeta = !!(event.ctrlKey || event.metaKey);
+      if (!ctrlOrMeta) {
+        return false;
+      }
+      const zoomIn =
+        key === '+' ||
+        key === '=' ||
+        code === 'Equal' ||
+        code === 'NumpadAdd';
+      const zoomOut =
+        key === '-' ||
+        key === '_' ||
+        code === 'Minus' ||
+        code === 'NumpadSubtract';
+      if (!zoomIn && !zoomOut) {
+        return false;
+      }
+      const fallbackKey =
+        key ||
+        (typeof event.keyCode === 'number'
+          ? String.fromCharCode(event.keyCode).toLowerCase()
+          : '');
+      const isZoomIn =
+        zoomIn ||
+        fallbackKey === '+' ||
+        fallbackKey === '=';
+      const isZoomOut =
+        zoomOut ||
+        fallbackKey === '-' ||
+        fallbackKey === '_';
+      if (!isZoomIn && !isZoomOut) {
+        return false;
+      }
+      if (typeof event.preventDefault === 'function') {
+        event.preventDefault();
+      }
+      if (typeof event.stopPropagation === 'function') {
+        event.stopPropagation();
+      }
+      event.returnValue = false;
+      this.adjustZoom(isZoomIn ? 1 : -1);
+      return true;
+    },
+
+    adjustZoom(direction) {
+      if (!this.browser) {
+        return;
+      }
+      const step = Number.isFinite(Number(this.zoomStep)) ? Number(this.zoomStep) : 0.1;
+      const current = Number.isFinite(Number(this.zoomFactor)) ? Number(this.zoomFactor) : 1;
+      const next = current + step * direction;
+      this.applyZoomFactor(next);
+    },
+
+    applyZoomFactor(factor) {
+      if (!this.browser) {
+        return;
+      }
+      const min = Number.isFinite(Number(this.minZoomFactor)) ? Number(this.minZoomFactor) : 0.25;
+      const max = Number.isFinite(Number(this.maxZoomFactor)) ? Number(this.maxZoomFactor) : 3;
+      const clamped = Math.min(max, Math.max(min, factor));
+      const rounded = Math.round(clamped * 100) / 100;
+      try {
+        if (typeof this.browser.setZoomFactor === 'function') {
+          this.browser.setZoomFactor(rounded);
+          this.zoomFactor = rounded;
+          return;
+        }
+        if (typeof this.browser.setZoomLevel === 'function') {
+          const level = this.zoomFactorToLevel(rounded);
+          this.browser.setZoomLevel(level);
+          this.zoomFactor = rounded;
+          return;
+        }
+        this.zoomFactor = rounded;
+      } catch (err) {
+        console.error('[mini-browser] set zoom failed', err);
+      }
+    },
+
+    zoomFactorToLevel(factor) {
+      const safeFactor = Number.isFinite(Number(factor)) && factor > 0 ? Number(factor) : 1;
+      return Math.log(safeFactor) / Math.log(1.2);
+    },
+
+    zoomLevelToFactor(level) {
+      if (!Number.isFinite(Number(level))) {
+        return 1;
+      }
+      return Math.pow(1.2, Number(level));
+    },
+
     focusBrowser() {
       if (!this.visible) {
         this.show(true);
@@ -607,19 +938,18 @@
       }
       const level = Number.isFinite(Number(logLevel)) ? Number(logLevel) : 2;
       const options = Object.assign({title: 'Mini Browser'}, opts || {});
+      const text = String(message);
       if (typeof this.client.request === 'function') {
         this.client
-          .request('nvim_notify', [String(message), level, options])
+          .request('nvim_notify', [text, level, options])
           .catch(err => {
-            console.warn('[mini-browser] nvim_notify failed, falling back to echomsg', err);
-            this.showNotificationFallback(message, level, options);
+            console.warn('[mini-browser] nvim_notify failed', err);
           });
-        return;
       }
-      this.showNotificationFallback(message, level, options);
+      this.showNotificationEcho(text, level);
     },
 
-    showNotificationFallback(message, logLevel, opts) {
+    showNotificationEcho(message, logLevel) {
       if (!this.client || typeof this.client.command !== 'function') {
         return;
       }
@@ -635,7 +965,7 @@
         parts.push('echohl None');
       }
       this.client.command(parts.join(' | ')).catch(err => {
-        console.error('[mini-browser] fallback notification failed', err, {message, opts});
+        console.error('[mini-browser] echomsg notification failed', err, {message});
       });
     },
 
