@@ -1,6 +1,7 @@
 const {ipcRenderer} = require('electron');
 
 let overlayId = null;
+let pendingCtrlBackslash = false;
 
 ipcRenderer.on('mini-browser:set-overlay-id', (_event, id) => {
   overlayId = id;
@@ -90,6 +91,22 @@ window.addEventListener(
   event => {
     const key = event.key ? event.key.toLowerCase() : '';
     const code = event.code || '';
+    if ((event.ctrlKey || event.metaKey) && (key === '\\' || code === 'Backslash')) {
+      pendingCtrlBackslash = true;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (pendingCtrlBackslash) {
+      if ((event.ctrlKey || event.metaKey) && (key === 'n' || code === 'KeyN')) {
+        pendingCtrlBackslash = false;
+        ipcRenderer.sendToHost('mini-browser:focus', false);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      pendingCtrlBackslash = false;
+    }
     if ((event.ctrlKey || event.metaKey) && (key === ']' || code === 'BracketRight')) {
       ipcRenderer.sendToHost('mini-browser:toggle');
       event.preventDefault();

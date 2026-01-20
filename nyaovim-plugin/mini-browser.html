@@ -101,6 +101,8 @@
       this.windowKeyHandler = null;
       this.lastReportedFocus = null;
       this.documentMouseDownHandler = null;
+      this.suppressBrowserFocus = false;
+      this.allowBrowserFocus = false;
       this.zoomFactor = 1;
       this.minZoomFactor = 0.25;
       this.maxZoomFactor = 3;
@@ -109,6 +111,7 @@
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
       this.browser.setAttribute('preload', preloadUrl);
+      this.browser.setAttribute('tabindex', '-1');
       this.applyLayout();
       const ua = this.useragent || (typeof navigator !== 'undefined' ? navigator.userAgent : '');
       if (typeof this.browser.setUserAgentOverride === 'function') {
@@ -152,6 +155,11 @@
           } catch (err) {
             console.warn('[mini-browser] getZoomLevel failed', err);
           }
+        }
+      });
+      this.browser.addEventListener('did-finish-load', () => {
+        if (this.suppressBrowserFocus && this.visible) {
+          this.startFocusGuard('did-finish-load');
         }
       });
       this.browser.addEventListener('ipc-message', e => {
@@ -217,13 +225,19 @@
         if (e.channel === 'mini-browser:focus') {
           const focused = !!(e.args && e.args[0]);
           if (focused) {
+            if (this.suppressBrowserFocus && !this.allowBrowserFocus) {
+              if (this.browser && typeof this.browser.blur === 'function') {
+                this.browser.blur();
+              }
+              this.focusEditor();
+              return;
+            }
             if (this.activeTarget !== 'browser') {
               this.activeTarget = 'browser';
               this.notifyFocusState('browser');
             }
           } else if (this.activeTarget !== 'editor') {
-            this.activeTarget = 'editor';
-            this.notifyFocusState('editor');
+            this.focusEditor();
           }
         }
       });
@@ -269,6 +283,13 @@
         }
       });
       this.browser.addEventListener('focus', () => {
+        if (this.suppressBrowserFocus && !this.allowBrowserFocus) {
+          if (this.browser && typeof this.browser.blur === 'function') {
+            this.browser.blur();
+          }
+          this.focusEditor();
+          return;
+        }
         this.activeTarget = 'browser';
         this.notifyFocusState('browser');
       });
@@ -286,14 +307,12 @@
         const insideBrowser =
           path.includes(this.browser) ||
           (this.body && (path.includes(this.body) || this.body.contains(event.target)));
-        console.debug('[mini-browser] mousedown', {
-          insideBrowser,
-          target: event.target && event.target.tagName,
-          activeTarget: this.activeTarget,
-        });
         if (insideBrowser) {
+          this.allowBrowserFocus = true;
+          this.suppressBrowserFocus = false;
           this.focusBrowser();
         } else if (this.activeTarget !== 'editor') {
+          this.allowBrowserFocus = false;
           this.activeTarget = 'editor';
           this.notifyFocusState('editor');
         }
@@ -885,6 +904,8 @@
         this.show(true);
         return;
       }
+      this.allowBrowserFocus = true;
+      this.suppressBrowserFocus = false;
       if (this.browser) {
         setTimeout(() => {
           if (this.browser && typeof this.browser.focus === 'function') {
@@ -900,6 +921,7 @@
       if (this.editor && typeof this.editor.focus === 'function') {
         this.editor.focus();
       }
+      this.allowBrowserFocus = false;
       this.activeTarget = 'editor';
       this.notifyFocusState('editor');
     },
@@ -1091,6 +1113,8 @@
         this.isForeground = true;
       }
       if (focus) {
+        this.allowBrowserFocus = true;
+        this.suppressBrowserFocus = false;
         if (this.browser && typeof this.browser.focus === 'function') {
           this.browser.focus();
         }
@@ -1100,6 +1124,13 @@
         this.activeTarget = 'browser';
         this.notifyFocusState('browser');
       } else {
+        this.allowBrowserFocus = false;
+        this.suppressBrowserFocus = true;
+        if (this.browser && typeof this.browser.blur === 'function') {
+          this.browser.blur();
+        }
+        this.focusEditor();
+        this.startFocusGuard('show');
         this.activeTarget = 'editor';
         this.notifyFocusState('editor');
       }
@@ -1118,6 +1149,31 @@
       }
       this.browser.src = url;
       this.show(focus);
+      if (!focus) {
+        this.startFocusGuard('open');
+      }
+    },
+
+    startFocusGuard(reason) {
+      if (!this.suppressBrowserFocus) {
+        return;
+      }
+      if (this._focusGuardTimer) {
+        clearTimeout(this._focusGuardTimer);
+        this._focusGuardTimer = null;
+      }
+      let attempts = 0;
+      const tick = () => {
+        if (!this.suppressBrowserFocus) {
+          return;
+        }
+        attempts += 1;
+        this.focusEditor();
+        if (attempts < 6) {
+          this._focusGuardTimer = setTimeout(tick, 75);
+        }
+      };
+      tick();
     },
 
     close() {

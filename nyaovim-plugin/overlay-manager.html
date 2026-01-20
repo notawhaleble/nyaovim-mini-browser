@@ -307,9 +307,9 @@
       entry.rendered = false;
       if (entry.pluginElement && typeof entry.pluginElement.open === 'function') {
         if (payload && payload.options && payload.options.url !== undefined) {
-          entry.pluginElement.open(payload.options.url, payload.options.focus !== false);
+          entry.pluginElement.open(payload.options.url, payload.options.focus === true);
         } else if (entry.pluginElement.visible === false && typeof entry.pluginElement.show === 'function') {
-          entry.pluginElement.show(payload && payload.options ? payload.options.focus !== false : true);
+          entry.pluginElement.show(payload && payload.options ? payload.options.focus === true : true);
         }
       }
       if (typeof entry.pluginElement.setOverlayOptions === 'function') {
