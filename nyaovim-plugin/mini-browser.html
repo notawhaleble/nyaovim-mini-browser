@@ -1174,6 +1174,12 @@
       if (options.preciseClearSelection) {
         this.sendPreciseSelection({clear: true});
       }
+      if (options.preciseDebugSelection) {
+        this.sendPreciseDebugSelection(options.preciseDebugSelection);
+      }
+      if (options.preciseClearDebugSelection) {
+        this.sendPreciseDebugSelection({clear: true});
+      }
       if (options.preciseScroll) {
         this.sendPreciseScroll(options.preciseScroll);
       }
@@ -1271,6 +1277,25 @@
       console.log('[mini-browser] precise selection', start, end);
       this.precise.lastSelection = {start, end};
       this.sendPreciseMessage({type: 'selection', start, end});
+    },
+
+    sendPreciseDebugSelection(payload) {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      if (this.activeTarget === 'browser') {
+        return;
+      }
+      if (payload && payload.clear) {
+        this.sendPreciseMessage({type: 'debug-selection', clear: true});
+        return;
+      }
+      const start = payload && typeof payload.start === 'number' ? payload.start : null;
+      const end = payload && typeof payload.end === 'number' ? payload.end : null;
+      if (start === null || end === null) {
+        return;
+      }
+      this.sendPreciseMessage({type: 'debug-selection', start, end});
     },
 
     sendPreciseScroll(payload) {

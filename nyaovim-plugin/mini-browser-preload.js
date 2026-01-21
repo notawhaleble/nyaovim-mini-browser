@@ -217,12 +217,15 @@ const preciseState = {
   lineHeight: 16,
   lastCursorIndex: null,
   lastSelection: null,
+  lastDebugSelection: null,
   suppressAutoScrollOnce: false,
   overlay: {
     root: null,
     caret: null,
     selectionRoot: null,
+    debugSelectionRoot: null,
     selectionNodes: [],
+    debugSelectionNodes: [],
   },
   pendingRender: false,
 };
@@ -340,8 +343,18 @@ function ensureOverlay() {
   selectionRoot.style.width = '100%';
   selectionRoot.style.height = '100%';
   selectionRoot.style.pointerEvents = 'none';
+  const debugSelectionRoot = preciseState.overlay.debugSelectionRoot || document.createElement('div');
+  debugSelectionRoot.style.position = 'absolute';
+  debugSelectionRoot.style.top = '0px';
+  debugSelectionRoot.style.left = '0px';
+  debugSelectionRoot.style.width = '100%';
+  debugSelectionRoot.style.height = '100%';
+  debugSelectionRoot.style.pointerEvents = 'none';
   if (!selectionRoot.isConnected) {
     root.appendChild(selectionRoot);
+  }
+  if (!debugSelectionRoot.isConnected) {
+    root.appendChild(debugSelectionRoot);
   }
   if (!caret.isConnected) {
     root.appendChild(caret);
@@ -353,6 +366,7 @@ function ensureOverlay() {
   preciseState.overlay.root = root;
   preciseState.overlay.caret = caret;
   preciseState.overlay.selectionRoot = selectionRoot;
+  preciseState.overlay.debugSelectionRoot = debugSelectionRoot;
 }
 
 function updateLineHeight() {
@@ -592,6 +606,17 @@ function clearSelectionOverlay() {
   preciseState.overlay.selectionNodes = [];
 }
 
+function clearDebugSelectionOverlay() {
+  if (!preciseState.overlay.debugSelectionRoot) {
+    return;
+  }
+  const root = preciseState.overlay.debugSelectionRoot;
+  while (root.firstChild) {
+    root.removeChild(root.firstChild);
+  }
+  preciseState.overlay.debugSelectionNodes = [];
+}
+
 function renderSelection(range) {
   if (!range || range.start === undefined || range.end === undefined) {
     clearSelectionOverlay();
@@ -654,6 +679,48 @@ function renderCaret(index) {
   }
 }
 
+function renderDebugSelection(range) {
+  if (!range || range.start === undefined || range.end === undefined) {
+    clearDebugSelectionOverlay();
+    return;
+  }
+  const startBoundary = domBoundaryForIndex(range.start, false);
+  const endBoundary = domBoundaryForIndex(range.end, true);
+  if (!startBoundary || !endBoundary) {
+    clearDebugSelectionOverlay();
+    return;
+  }
+  const domRange = document.createRange();
+  try {
+    domRange.setStart(startBoundary.node, startBoundary.offset);
+    domRange.setEnd(endBoundary.node, endBoundary.offset);
+  } catch (_err) {
+    domRange.detach();
+    clearDebugSelectionOverlay();
+    return;
+  }
+  const rects = domRange.getClientRects();
+  clearDebugSelectionOverlay();
+  const root = preciseState.overlay.debugSelectionRoot;
+  for (let i = 0; i < rects.length; i += 1) {
+    const r = rects[i];
+    if (r.width <= 0 || r.height <= 0) {
+      continue;
+    }
+    const node = document.createElement('div');
+    node.style.position = 'absolute';
+    node.style.left = `${Math.round(r.left + window.scrollX)}px`;
+    node.style.top = `${Math.round(r.top + window.scrollY)}px`;
+    node.style.width = `${Math.max(1, Math.round(r.width))}px`;
+    node.style.height = `${Math.max(1, Math.round(r.height))}px`;
+    node.style.border = '1px dashed rgba(40, 120, 255, 0.9)';
+    node.style.background = 'rgba(40, 120, 255, 0.08)';
+    root.appendChild(node);
+    preciseState.overlay.debugSelectionNodes.push(node);
+  }
+  domRange.detach();
+}
+
 function scheduleRender() {
   if (preciseState.pendingRender) {
     return;
@@ -672,6 +739,11 @@ function scheduleRender() {
       renderSelection(preciseState.lastSelection);
     } else {
       clearSelectionOverlay();
+    }
+    if (preciseState.lastDebugSelection) {
+      renderDebugSelection(preciseState.lastDebugSelection);
+    } else {
+      clearDebugSelectionOverlay();
     }
   });
 }
@@ -735,6 +807,23 @@ function handlePreciseUpdate(payload) {
     const end = Number(payload.end);
     if (Number.isFinite(start) && Number.isFinite(end)) {
       preciseState.lastSelection = {
+        start: Math.max(0, start),
+        end: Math.max(0, end),
+      };
+      scheduleRender();
+    }
+    return;
+  }
+  if (payload.type === 'debug-selection') {
+    if (payload.clear) {
+      preciseState.lastDebugSelection = null;
+      clearDebugSelectionOverlay();
+      return;
+    }
+    const start = Number(payload.start);
+    const end = Number(payload.end);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      preciseState.lastDebugSelection = {
         start: Math.max(0, start),
         end: Math.max(0, end),
       };
