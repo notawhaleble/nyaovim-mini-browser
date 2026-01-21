@@ -88,7 +88,9 @@ function! s:precise_visual_range(bufnr) abort
     let start = getpos('v')
     let endpos = getpos('.')
     call s:precise_log('visual mode=' . mode . ' start=' . string(start) . ' end=' . string(endpos))
-    if start[0] != a:bufnr || endpos[0] != a:bufnr
+    let start_buf = start[0] == 0 ? a:bufnr : start[0]
+    let end_buf = endpos[0] == 0 ? a:bufnr : endpos[0]
+    if start_buf != a:bufnr || end_buf != a:bufnr
         call s:precise_log('visual selection buffer mismatch')
         return v:null
     endif
