@@ -30,6 +30,9 @@
 <script>
 (function() {
   'use strict';
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
 
   Polymer({
     is: 'mini-browser',
@@ -107,6 +110,14 @@
       this.minZoomFactor = 0.25;
       this.maxZoomFactor = 3;
       this.zoomStep = 0.1;
+      this.precise = {
+        enabled: false,
+        browserReady: false,
+        pendingMessages: [],
+        lastCursorIndex: null,
+        lastSelection: null,
+        lineHeight: 16,
+      };
       const {shell} = require('electron');
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
@@ -156,6 +167,22 @@
             console.warn('[mini-browser] getZoomLevel failed', err);
           }
         }
+        this.precise.browserReady = true;
+        this.flushPreciseMessages();
+        if (this.precise.enabled) {
+          this.sendPreciseMessage({type: 'mode', enabled: true});
+          this.sendPreciseMessage({type: 'rebuild'});
+          if (this.precise.lastCursorIndex !== null) {
+            this.sendPreciseMessage({type: 'cursor', index: this.precise.lastCursorIndex});
+          }
+          if (this.precise.lastSelection) {
+            this.sendPreciseMessage({
+              type: 'selection',
+              start: this.precise.lastSelection.start,
+              end: this.precise.lastSelection.end,
+            });
+          }
+        }
       });
       this.browser.addEventListener('did-finish-load', () => {
         if (this.suppressBrowserFocus && this.visible) {
@@ -166,6 +193,27 @@
         if (e.channel === 'mini-browser:notification') {
           const payload = Array.isArray(e.args) ? e.args[0] : undefined;
           this.handleBrowserNotification(payload);
+          return;
+        }
+        if (e.channel === 'mini-browser:precise-map') {
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          this.handlePreciseMap(payload);
+          return;
+        }
+        if (e.channel === 'mini-browser:precise-error') {
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          if (payload && payload.message) {
+            this.sendVimNotification(payload.message, 3, {title: 'Mini Browser'});
+          }
+          const bufferId = Number(this.overlayId || this.editor?.buffer?.id || NaN);
+          if (Number.isFinite(bufferId) && this.client) {
+            this.client.command(`call setbufvar(${bufferId}, 'minibrowser_precise_rebuilding', 0)`).catch(() => {});
+          }
+          return;
+        }
+        if (e.channel === 'mini-browser:precise-ready') {
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          console.log('[mini-browser] precise preload ready', payload);
           return;
         }
         if (e.channel === 'mini-browser:toggle') {
@@ -915,6 +963,9 @@
       }
       this.activeTarget = 'browser';
       this.notifyFocusState('browser');
+      if (this.precise && this.precise.enabled) {
+        this.sendPreciseMessage({type: 'mode', enabled: false});
+      }
     },
 
     focusEditor() {
@@ -924,6 +975,19 @@
       this.allowBrowserFocus = false;
       this.activeTarget = 'editor';
       this.notifyFocusState('editor');
+      if (this.precise && this.precise.enabled) {
+        this.sendPreciseMessage({type: 'mode', enabled: true});
+        if (this.precise.lastCursorIndex !== null) {
+          this.sendPreciseMessage({type: 'cursor', index: this.precise.lastCursorIndex});
+        }
+        if (this.precise.lastSelection) {
+          this.sendPreciseMessage({
+            type: 'selection',
+            start: this.precise.lastSelection.start,
+            end: this.precise.lastSelection.end,
+          });
+        }
+      }
     },
 
     handleBrowserNotification(payload) {
@@ -966,13 +1030,10 @@
       const level = Number.isFinite(Number(logLevel)) ? Number(logLevel) : 2;
       const options = Object.assign({title: 'Mini Browser'}, opts || {});
       const text = String(message);
-      if (typeof this.client.request === 'function') {
-        this.client
-          .request('nvim_notify', [text, level, options])
-          .catch(err => {
-            console.warn('[mini-browser] nvim_notify failed', err);
-          });
-      }
+      this.nvimRequest('nvim_notify', [text, level, options])
+        .catch(err => {
+          console.warn('[mini-browser] nvim_notify failed', err);
+        });
       this.showNotificationEcho(text, level);
     },
 
@@ -994,6 +1055,24 @@
       this.client.command(parts.join(' | ')).catch(err => {
         console.error('[mini-browser] echomsg notification failed', err, {message});
       });
+    },
+
+    nvimRequest(method, args) {
+      if (!this.client) {
+        return Promise.reject(new Error('nvim client not available'));
+      }
+      if (typeof this.client.request === 'function') {
+        return this.client.request(method, args);
+      }
+      if (typeof this.client.call === 'function') {
+        try {
+          const result = this.client.call(method, args);
+          return result && typeof result.then === 'function' ? result : Promise.resolve(result);
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
+      return Promise.reject(new Error('nvim client request/call not supported'));
     },
 
     notifyFocusState(state) {
@@ -1080,6 +1159,24 @@
       if (options.dock !== undefined) {
         this.dock = options.dock;
       }
+      if (options.preciseMode !== undefined) {
+        this.setPreciseMode(!!options.preciseMode);
+      }
+      if (options.preciseRebuild) {
+        this.requestPreciseRebuild();
+      }
+      if (options.preciseCursor) {
+        this.sendPreciseCursor(options.preciseCursor);
+      }
+      if (options.preciseSelection) {
+        this.sendPreciseSelection(options.preciseSelection);
+      }
+      if (options.preciseClearSelection) {
+        this.sendPreciseSelection({clear: true});
+      }
+      if (options.preciseScroll) {
+        this.sendPreciseScroll(options.preciseScroll);
+      }
       if (options.visible === true) {
         this.show(options.focus === undefined ? false : !!options.focus);
       } else if (options.visible === false) {
@@ -1088,6 +1185,130 @@
       if (options.foreground !== undefined) {
         this.setOverlayForeground(options.foreground);
       }
+    },
+
+    flushPreciseMessages() {
+      if (!this.precise || !this.precise.browserReady || !this.browser) {
+        return;
+      }
+      const pending = this.precise.pendingMessages || [];
+      this.precise.pendingMessages = [];
+      if (pending.length) {
+        console.log('[mini-browser] precise flush', pending);
+      }
+      pending.forEach(message => {
+        this.browser.send('mini-browser:precise-update', message);
+      });
+    },
+
+    sendPreciseMessage(message) {
+      if (!this.browser || !this.precise) {
+        return;
+      }
+      if (!this.precise.browserReady) {
+        this.precise.pendingMessages.push(message);
+        return;
+      }
+      this.browser.send('mini-browser:precise-update', message);
+    },
+
+    setPreciseMode(enabled) {
+      if (!this.precise) {
+        return;
+      }
+      const next = !!enabled;
+      this.precise.enabled = next;
+      console.log('[mini-browser] precise mode', next);
+      this.sendPreciseMessage({type: 'mode', enabled: next});
+      if (!next) {
+        this.precise.lastCursorIndex = null;
+        this.precise.lastSelection = null;
+      }
+    },
+
+    requestPreciseRebuild() {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      console.log('[mini-browser] precise rebuild request');
+      this.sendPreciseMessage({type: 'rebuild'});
+    },
+
+    sendPreciseCursor(payload) {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      if (this.activeTarget === 'browser') {
+        return;
+      }
+      const index = payload && typeof payload.index === 'number' ? payload.index : null;
+      if (index === null) {
+        return;
+      }
+      console.log('[mini-browser] precise cursor', index);
+      this.precise.lastCursorIndex = index;
+      this.sendPreciseMessage({type: 'cursor', index});
+    },
+
+    sendPreciseSelection(payload) {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      if (this.activeTarget === 'browser') {
+        return;
+      }
+      if (payload && payload.clear) {
+        this.precise.lastSelection = null;
+        console.log('[mini-browser] precise selection clear');
+        this.sendPreciseMessage({type: 'selection', clear: true});
+        return;
+      }
+      const start = payload && typeof payload.start === 'number' ? payload.start : null;
+      const end = payload && typeof payload.end === 'number' ? payload.end : null;
+      if (start === null || end === null) {
+        return;
+      }
+      console.log('[mini-browser] precise selection', start, end);
+      this.precise.lastSelection = {start, end};
+      this.sendPreciseMessage({type: 'selection', start, end});
+    },
+
+    sendPreciseScroll(payload) {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      const lines = payload && typeof payload.lines === 'number' ? payload.lines : 0;
+      if (!lines) {
+        return;
+      }
+      console.log('[mini-browser] precise scroll', lines);
+      this.sendPreciseMessage({type: 'scroll', lines});
+    },
+
+    handlePreciseMap(payload) {
+      if (!payload || !Array.isArray(payload.lines)) {
+        return;
+      }
+      const bufferId = Number(this.overlayId || this.editor?.buffer?.id || NaN);
+      if (!Number.isFinite(bufferId) || !this.client) {
+        return;
+      }
+      console.log('[mini-browser] precise map received', {lines: payload.lines.length});
+      const lines = payload.lines.map(line => (line === undefined || line === null) ? '' : String(line));
+      const updateBuffer = async () => {
+        try {
+          const jsonLines = JSON.stringify(lines);
+          const filename = `nyaovim-mini-browser-precise-${bufferId}-${Date.now()}.json`;
+          const filepath = path.join(os.tmpdir(), filename);
+          fs.writeFileSync(filepath, jsonLines, 'utf8');
+          const escapedPath = filepath.replace(/'/g, "''");
+          console.log('[mini-browser] precise apply buffer', {bufferId, length: jsonLines.length, filepath});
+          await this.client.command(`call MiniBrowserPreciseApplyFile(${bufferId}, '${escapedPath}')`);
+        } catch (err) {
+          console.error('[mini-browser] precise map update failed', err);
+        }
+      };
+      updateBuffer();
     },
 
     setOverlayForeground(foreground) {

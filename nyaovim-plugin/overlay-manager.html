@@ -133,6 +133,11 @@
       if (!payload) {
         return;
       }
+      if (payload.options && (payload.options.preciseMode !== undefined || payload.options.preciseRebuild ||
+        payload.options.preciseCursor || payload.options.preciseSelection || payload.options.preciseClearSelection ||
+        payload.options.preciseScroll)) {
+        console.log('[overlay-manager] precise update payload', payload);
+      }
       const id = this.normalizeId(payload.id);
       const entry = this.overlays.get(id);
       if (!entry) {
@@ -141,6 +146,13 @@
       entry.options = Object.assign({}, entry.options, payload.options || {});
       if (payload.plugin && payload.plugin !== entry.plugin) {
         this.replaceOverlayPlugin(entry, payload.plugin, entry.options);
+      }
+      if (payload.options && entry.pluginElement) {
+        if (typeof entry.pluginElement.setOverlayOptions === 'function') {
+          entry.pluginElement.setOverlayOptions(payload.options);
+        } else {
+          this.applyOptionsToPlugin(entry.pluginElement, payload.options);
+        }
       }
       this.refreshOverlay(entry, true);
     },
