@@ -118,6 +118,7 @@
         lastSelection: null,
         lineHeight: 16,
       };
+      this.preciseRebuildTimer = null;
       const {shell} = require('electron');
       this.body.setAttribute('tabindex', '-1');
       const preloadUrl = this.resolveUrl('mini-browser-preload.js');
@@ -187,6 +188,9 @@
       this.browser.addEventListener('did-finish-load', () => {
         if (this.suppressBrowserFocus && this.visible) {
           this.startFocusGuard('did-finish-load');
+        }
+        if (this.precise && this.precise.enabled) {
+          this.schedulePreciseRebuild('did-finish-load');
         }
       });
       this.browser.addEventListener('ipc-message', e => {
@@ -581,6 +585,9 @@
           if (this.matchActiveWindow && this.visible) {
             this.scheduleWindowMetricsRefresh();
           }
+          if (this.precise && this.precise.enabled) {
+            this.schedulePreciseRebuild('window-resize');
+          }
         };
         window.addEventListener('resize', this.windowResizeHandler);
       }
@@ -619,6 +626,10 @@
       if (this.windowResizeHandler) {
         window.removeEventListener('resize', this.windowResizeHandler);
         this.windowResizeHandler = null;
+      }
+      if (this.preciseRebuildTimer) {
+        clearTimeout(this.preciseRebuildTimer);
+        this.preciseRebuildTimer = null;
       }
       if (this.pendingWindowMetrics) {
         clearTimeout(this.pendingWindowMetrics);
@@ -921,15 +932,24 @@
         if (typeof this.browser.setZoomFactor === 'function') {
           this.browser.setZoomFactor(rounded);
           this.zoomFactor = rounded;
+          if (this.precise && this.precise.enabled) {
+            this.schedulePreciseRebuild('zoom');
+          }
           return;
         }
         if (typeof this.browser.setZoomLevel === 'function') {
           const level = this.zoomFactorToLevel(rounded);
           this.browser.setZoomLevel(level);
           this.zoomFactor = rounded;
+          if (this.precise && this.precise.enabled) {
+            this.schedulePreciseRebuild('zoom');
+          }
           return;
         }
         this.zoomFactor = rounded;
+        if (this.precise && this.precise.enabled) {
+          this.schedulePreciseRebuild('zoom');
+        }
       } catch (err) {
         console.error('[mini-browser] set zoom failed', err);
       }
@@ -1238,6 +1258,21 @@
       }
       console.log('[mini-browser] precise rebuild request');
       this.sendPreciseMessage({type: 'rebuild'});
+    },
+
+    schedulePreciseRebuild(reason) {
+      if (!this.precise || !this.precise.enabled) {
+        return;
+      }
+      const delay = 120;
+      if (this.preciseRebuildTimer) {
+        clearTimeout(this.preciseRebuildTimer);
+      }
+      this.preciseRebuildTimer = setTimeout(() => {
+        this.preciseRebuildTimer = null;
+        console.log('[mini-browser] precise rebuild schedule', reason || 'auto');
+        this.requestPreciseRebuild();
+      }, delay);
     },
 
     sendPreciseCursor(payload) {

@@ -64,7 +64,7 @@ function! s:precise_offsets(bufnr) abort
     let total = 0
     for line in lines
         call add(offsets, total)
-        let total += strlen(line) + 1
+        let total += strchars(line) + 1
     endfor
     call setbufvar(a:bufnr, 'minibrowser_precise_offsets', offsets)
     return offsets
@@ -77,7 +77,9 @@ function! s:precise_index_for_pos(bufnr, lnum, col) abort
     endif
     let base = offsets[a:lnum - 1]
     let column = max([a:col, 1]) - 1
-    return base + column
+    let line_text = getline(a:lnum)
+    let prefix = strpart(line_text, 0, column)
+    return base + strchars(prefix)
 endfunction
 
 function! s:precise_visual_range(bufnr) abort
@@ -101,7 +103,7 @@ function! s:precise_visual_range(bufnr) abort
     if mode ==# 'V'
         let start_col = 1
         let end_line = getline(end_lnum)
-        let end_col = strlen(end_line) + 1
+        let end_col = strchars(end_line) + 1
     endif
     if start_lnum > end_lnum || (start_lnum == end_lnum && start_col > end_col)
         let tmp_lnum = start_lnum
@@ -253,6 +255,8 @@ function! MiniBrowserPreciseApply(buffer, lines_json) abort
         return
     endif
     call s:precise_log('apply buffer=' . a:buffer)
+    let prev_modifiable = getbufvar(a:buffer, '&modifiable')
+    let prev_readonly = getbufvar(a:buffer, '&readonly')
     let lines = []
     if type(a:lines_json) == type('')
         try
@@ -268,13 +272,15 @@ function! MiniBrowserPreciseApply(buffer, lines_json) abort
     endif
     call s:precise_log('apply lines=' . len(lines))
     call setbufvar(a:buffer, '&modifiable', 1)
+    call setbufvar(a:buffer, '&readonly', 0)
     call setbufline(a:buffer, 1, lines)
     let last = len(lines) + 1
     if line('$', a:buffer) >= last
         call deletebufline(a:buffer, last, '$')
     endif
     call setbufvar(a:buffer, '&modified', 0)
-    call setbufvar(a:buffer, '&modifiable', 0)
+    call setbufvar(a:buffer, '&modifiable', prev_modifiable)
+    call setbufvar(a:buffer, '&readonly', prev_readonly)
     call setbufvar(a:buffer, 'minibrowser_precise_offsets', v:null)
     call setbufvar(a:buffer, 'minibrowser_precise_rebuilding', 0)
     call MiniBrowserPreciseRefresh(a:buffer)
@@ -450,6 +456,9 @@ function! MiniBrowserOpen(bang, ...) abort
 
     call MiniBrowserNotifyFocus(buffer, focus ? 'browser' : 'editor')
     call s:apply_buffer_settings()
+    if get(g:, 'nyaovim_mini_browser_precise_auto', 1)
+        call MiniBrowserPreciseCommand('on')
+    endif
 endfunction
 
 function! MiniBrowserClose(...) abort
