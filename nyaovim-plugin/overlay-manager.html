@@ -133,11 +133,6 @@
       if (!payload) {
         return;
       }
-      if (payload.options && (payload.options.preciseMode !== undefined || payload.options.preciseRebuild ||
-        payload.options.preciseCursor || payload.options.preciseSelection || payload.options.preciseClearSelection ||
-        payload.options.preciseScroll)) {
-        console.log('[overlay-manager] precise update payload', payload);
-      }
       const id = this.normalizeId(payload.id);
       const entry = this.overlays.get(id);
       if (!entry) {

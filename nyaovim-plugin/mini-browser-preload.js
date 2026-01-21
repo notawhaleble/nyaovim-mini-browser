@@ -5,11 +5,84 @@ let pendingCtrlBackslash = false;
 
 ipcRenderer.on('mini-browser:set-overlay-id', (_event, id) => {
   overlayId = id;
-  ipcRenderer.sendToHost('mini-browser:precise-ready', {
-    overlayId,
-    timestamp: Date.now(),
-  });
 });
+
+function requestOpenInTab(url) {
+  const href = typeof url === 'string' ? url : '';
+  if (!href) {
+    return;
+  }
+  ipcRenderer.sendToHost('mini-browser:open-tab', {url: href, overlayId});
+}
+
+function shouldOpenInNewContext(event, anchor) {
+  if (!anchor) {
+    return false;
+  }
+  const target = (anchor.getAttribute('target') || '').toLowerCase();
+  if (target && target !== '_self') {
+    return true;
+  }
+  if (event && (event.metaKey || event.ctrlKey)) {
+    return true;
+  }
+  if (event && event.button === 1) {
+    return true;
+  }
+  return false;
+}
+
+window.addEventListener('click', event => {
+  if (!event || event.defaultPrevented) {
+    return;
+  }
+  const target = event.target;
+  if (!target || typeof target.closest !== 'function') {
+    return;
+  }
+  const anchor = target.closest('a[href]');
+  if (!anchor) {
+    return;
+  }
+  if (!shouldOpenInNewContext(event, anchor)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  requestOpenInTab(anchor.href);
+}, true);
+
+window.addEventListener('auxclick', event => {
+  if (!event || event.defaultPrevented) {
+    return;
+  }
+  const target = event.target;
+  if (!target || typeof target.closest !== 'function') {
+    return;
+  }
+  const anchor = target.closest('a[href]');
+  if (!anchor) {
+    return;
+  }
+  if (!shouldOpenInNewContext(event, anchor)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  requestOpenInTab(anchor.href);
+}, true);
+
+if (typeof window.open === 'function') {
+  const originalOpen = window.open;
+  window.open = function openProxy(url, target, features, replace) {
+    const targetText = typeof target === 'string' ? target.toLowerCase() : '';
+    if (targetText && targetText !== '_self') {
+      requestOpenInTab(url);
+      return null;
+    }
+    return originalOpen.call(window, url, target, features, replace);
+  };
+}
 
 function forwardBrowserNotification(title, options) {
   const payload = {
@@ -95,6 +168,15 @@ window.addEventListener(
   event => {
     const key = event.key ? event.key.toLowerCase() : '';
     const code = event.code || '';
+    if ((event.ctrlKey || event.metaKey) && (key === 'l' || code === 'KeyL')) {
+      ipcRenderer.sendToHost('mini-browser:show-url', {
+        url: window.location && window.location.href ? String(window.location.href) : '',
+        overlayId,
+      });
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && (key === '\\' || code === 'Backslash')) {
       pendingCtrlBackslash = true;
       event.preventDefault();
@@ -217,15 +299,12 @@ const preciseState = {
   lineHeight: 16,
   lastCursorIndex: null,
   lastSelection: null,
-  lastDebugSelection: null,
   suppressAutoScrollOnce: false,
   overlay: {
     root: null,
     caret: null,
     selectionRoot: null,
-    debugSelectionRoot: null,
     selectionNodes: [],
-    debugSelectionNodes: [],
   },
   pendingRender: false,
 };
@@ -343,18 +422,8 @@ function ensureOverlay() {
   selectionRoot.style.width = '100%';
   selectionRoot.style.height = '100%';
   selectionRoot.style.pointerEvents = 'none';
-  const debugSelectionRoot = preciseState.overlay.debugSelectionRoot || document.createElement('div');
-  debugSelectionRoot.style.position = 'absolute';
-  debugSelectionRoot.style.top = '0px';
-  debugSelectionRoot.style.left = '0px';
-  debugSelectionRoot.style.width = '100%';
-  debugSelectionRoot.style.height = '100%';
-  debugSelectionRoot.style.pointerEvents = 'none';
   if (!selectionRoot.isConnected) {
     root.appendChild(selectionRoot);
-  }
-  if (!debugSelectionRoot.isConnected) {
-    root.appendChild(debugSelectionRoot);
   }
   if (!caret.isConnected) {
     root.appendChild(caret);
@@ -366,7 +435,6 @@ function ensureOverlay() {
   preciseState.overlay.root = root;
   preciseState.overlay.caret = caret;
   preciseState.overlay.selectionRoot = selectionRoot;
-  preciseState.overlay.debugSelectionRoot = debugSelectionRoot;
 }
 
 function updateLineHeight() {
@@ -434,7 +502,6 @@ function buildMapping() {
   let lastLineTop = null;
   let charCount = 0;
   let lastWasSpace = false;
-  const startTime = Date.now();
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       return isTextNodeVisible(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
@@ -491,11 +558,6 @@ function buildMapping() {
   if (currentLine.length > 0 || lines.length === 0) {
     lines.push(currentLine);
   }
-  console.log('[mini-browser] precise map built', {
-    lines: lines.length,
-    chars: indexMap.length,
-    ms: Date.now() - startTime,
-  });
   return {lines, indexMap, lineHeight: preciseState.lineHeight};
 }
 
@@ -606,15 +668,17 @@ function clearSelectionOverlay() {
   preciseState.overlay.selectionNodes = [];
 }
 
-function clearDebugSelectionOverlay() {
-  if (!preciseState.overlay.debugSelectionRoot) {
-    return;
+function findBlockAncestor(node) {
+  let el = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (el && el.nodeType === Node.ELEMENT_NODE) {
+    const style = window.getComputedStyle(el);
+    const display = style ? style.display : '';
+    if (display && !display.startsWith('inline')) {
+      return el;
+    }
+    el = el.parentElement;
   }
-  const root = preciseState.overlay.debugSelectionRoot;
-  while (root.firstChild) {
-    root.removeChild(root.firstChild);
-  }
-  preciseState.overlay.debugSelectionNodes = [];
+  return null;
 }
 
 function renderSelection(range) {
@@ -640,20 +704,73 @@ function renderSelection(range) {
   const rects = domRange.getClientRects();
   clearSelectionOverlay();
   const root = preciseState.overlay.selectionRoot;
+  const linewise = !!range.linewise;
+  let blockRect = null;
+  if (linewise) {
+    const blockEl = findBlockAncestor(startBoundary.node) || findBlockAncestor(endBoundary.node);
+    if (blockEl) {
+      const box = blockEl.getBoundingClientRect();
+      if (box && box.width > 0 && box.height > 0) {
+        blockRect = box;
+      }
+    }
+  }
+  let lastTop = null;
+  let currentLeft = null;
+  let currentRight = null;
+  let currentTop = null;
+  let currentBottom = null;
+  const flushLine = () => {
+    if (currentLeft === null || currentRight === null || currentTop === null || currentBottom === null) {
+      return;
+    }
+    const node = document.createElement('div');
+    node.style.position = 'absolute';
+    node.style.left = `${Math.round(currentLeft + window.scrollX)}px`;
+    node.style.top = `${Math.round(currentTop + window.scrollY)}px`;
+    node.style.width = `${Math.max(1, Math.round(currentRight - currentLeft))}px`;
+    node.style.height = `${Math.max(1, Math.round(currentBottom - currentTop))}px`;
+    node.style.background = 'rgba(120,170,255,0.35)';
+    root.appendChild(node);
+    preciseState.overlay.selectionNodes.push(node);
+  };
   for (let i = 0; i < rects.length; i += 1) {
     const r = rects[i];
     if (r.width <= 0 || r.height <= 0) {
       continue;
     }
-    const node = document.createElement('div');
-    node.style.position = 'absolute';
-    node.style.left = `${Math.round(r.left + window.scrollX)}px`;
-    node.style.top = `${Math.round(r.top + window.scrollY)}px`;
-    node.style.width = `${Math.max(1, Math.round(r.width))}px`;
-    node.style.height = `${Math.max(1, Math.round(r.height))}px`;
-    node.style.background = 'rgba(120,170,255,0.35)';
-    root.appendChild(node);
-    preciseState.overlay.selectionNodes.push(node);
+    if (linewise) {
+      const left = blockRect ? blockRect.left : r.left;
+      const right = blockRect ? blockRect.right : r.right;
+      const top = r.top;
+      const bottom = r.bottom;
+      if (lastTop === null || Math.abs(top - lastTop) > 1) {
+        flushLine();
+        currentLeft = left;
+        currentRight = right;
+        currentTop = top;
+        currentBottom = bottom;
+        lastTop = top;
+      } else {
+        currentLeft = Math.min(currentLeft, left);
+        currentRight = Math.max(currentRight, right);
+        currentTop = Math.min(currentTop, top);
+        currentBottom = Math.max(currentBottom, bottom);
+      }
+    } else {
+      const node = document.createElement('div');
+      node.style.position = 'absolute';
+      node.style.left = `${Math.round(r.left + window.scrollX)}px`;
+      node.style.top = `${Math.round(r.top + window.scrollY)}px`;
+      node.style.width = `${Math.max(1, Math.round(r.width))}px`;
+      node.style.height = `${Math.max(1, Math.round(r.height))}px`;
+      node.style.background = 'rgba(120,170,255,0.35)';
+      root.appendChild(node);
+      preciseState.overlay.selectionNodes.push(node);
+    }
+  }
+  if (linewise) {
+    flushLine();
   }
   domRange.detach();
 }
@@ -679,48 +796,6 @@ function renderCaret(index) {
   }
 }
 
-function renderDebugSelection(range) {
-  if (!range || range.start === undefined || range.end === undefined) {
-    clearDebugSelectionOverlay();
-    return;
-  }
-  const startBoundary = domBoundaryForIndex(range.start, false);
-  const endBoundary = domBoundaryForIndex(range.end, true);
-  if (!startBoundary || !endBoundary) {
-    clearDebugSelectionOverlay();
-    return;
-  }
-  const domRange = document.createRange();
-  try {
-    domRange.setStart(startBoundary.node, startBoundary.offset);
-    domRange.setEnd(endBoundary.node, endBoundary.offset);
-  } catch (_err) {
-    domRange.detach();
-    clearDebugSelectionOverlay();
-    return;
-  }
-  const rects = domRange.getClientRects();
-  clearDebugSelectionOverlay();
-  const root = preciseState.overlay.debugSelectionRoot;
-  for (let i = 0; i < rects.length; i += 1) {
-    const r = rects[i];
-    if (r.width <= 0 || r.height <= 0) {
-      continue;
-    }
-    const node = document.createElement('div');
-    node.style.position = 'absolute';
-    node.style.left = `${Math.round(r.left + window.scrollX)}px`;
-    node.style.top = `${Math.round(r.top + window.scrollY)}px`;
-    node.style.width = `${Math.max(1, Math.round(r.width))}px`;
-    node.style.height = `${Math.max(1, Math.round(r.height))}px`;
-    node.style.border = '1px dashed rgba(40, 120, 255, 0.9)';
-    node.style.background = 'rgba(40, 120, 255, 0.08)';
-    root.appendChild(node);
-    preciseState.overlay.debugSelectionNodes.push(node);
-  }
-  domRange.detach();
-}
-
 function scheduleRender() {
   if (preciseState.pendingRender) {
     return;
@@ -740,11 +815,6 @@ function scheduleRender() {
     } else {
       clearSelectionOverlay();
     }
-    if (preciseState.lastDebugSelection) {
-      renderDebugSelection(preciseState.lastDebugSelection);
-    } else {
-      clearDebugSelectionOverlay();
-    }
   });
 }
 
@@ -752,7 +822,6 @@ function handlePreciseUpdate(payload) {
   if (!payload || typeof payload !== 'object') {
     return;
   }
-  console.log('[mini-browser] precise update', payload);
   if (payload.type === 'mode') {
     preciseState.enabled = !!payload.enabled;
     if (!preciseState.enabled) {
@@ -809,23 +878,7 @@ function handlePreciseUpdate(payload) {
       preciseState.lastSelection = {
         start: Math.max(0, start),
         end: Math.max(0, end),
-      };
-      scheduleRender();
-    }
-    return;
-  }
-  if (payload.type === 'debug-selection') {
-    if (payload.clear) {
-      preciseState.lastDebugSelection = null;
-      clearDebugSelectionOverlay();
-      return;
-    }
-    const start = Number(payload.start);
-    const end = Number(payload.end);
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      preciseState.lastDebugSelection = {
-        start: Math.max(0, start),
-        end: Math.max(0, end),
+        linewise: payload.linewise === true,
       };
       scheduleRender();
     }

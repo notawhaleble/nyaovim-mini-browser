@@ -28,20 +28,6 @@ endfunction
 
 let s:cmdline_marker = '-- BROWSER --'
 
-function! s:precise_log(msg) abort
-    if !get(g:, 'nyaovim_mini_browser_precise_debug', 0)
-        return
-    endif
-    let logfile = get(g:, 'nyaovim_mini_browser_precise_debug_file', '/tmp/nyaovim-mini-browser-precise.log')
-    let line = strftime('%Y-%m-%d %H:%M:%S') . ' [mini-browser:precise] ' . a:msg
-    try
-        call writefile([line], logfile, 'a')
-    catch
-        " Fallback to messages if write fails.
-        echomsg line
-    endtry
-endfunction
-
 function! s:precise_enabled(bufnr) abort
     return getbufvar(a:bufnr, 'minibrowser_precise', 0) == 1
 endfunction
@@ -89,11 +75,9 @@ function! s:precise_visual_range(bufnr) abort
     endif
     let start = getpos('v')
     let endpos = getpos('.')
-    call s:precise_log('visual mode=' . mode . ' start=' . string(start) . ' end=' . string(endpos))
     let start_buf = start[0] == 0 ? a:bufnr : start[0]
     let end_buf = endpos[0] == 0 ? a:bufnr : endpos[0]
     if start_buf != a:bufnr || end_buf != a:bufnr
-        call s:precise_log('visual selection buffer mismatch')
         return v:null
     endif
     let start_lnum = start[1]
@@ -115,40 +99,7 @@ function! s:precise_visual_range(bufnr) abort
     endif
     let start_idx = s:precise_index_for_pos(a:bufnr, start_lnum, start_col)
     let end_idx = s:precise_index_for_pos(a:bufnr, end_lnum, end_col) + 1
-    return [start_idx, end_idx]
-endfunction
-
-function! s:precise_word_range(bufnr) abort
-    if !get(g:, 'nyaovim_mini_browser_precise_debug_selection', 0)
-        return v:null
-    endif
-    if a:bufnr != bufnr('%')
-        return v:null
-    endif
-    let lnum = line('.')
-    let line_text = getline(lnum)
-    if line_text ==# ''
-        return v:null
-    endif
-    let col0 = col('.') - 1
-    if col0 < 0
-        let col0 = 0
-    endif
-    let start = col0
-    let end = col0
-    let maxcol = strlen(line_text)
-    while start > 0 && line_text[start - 1] =~# '\k'
-        let start -= 1
-    endwhile
-    while end < maxcol && line_text[end] =~# '\k'
-        let end += 1
-    endwhile
-    if start == end
-        return v:null
-    endif
-    let start_idx = s:precise_index_for_pos(a:bufnr, lnum, start + 1)
-    let end_idx = s:precise_index_for_pos(a:bufnr, lnum, end + 1)
-    return [start_idx, end_idx]
+    return [start_idx, end_idx, mode ==# 'V']
 endfunction
 
 function! s:precise_send_update(bufnr) abort
@@ -159,12 +110,10 @@ function! s:precise_send_update(bufnr) abort
         return
     endif
     if getbufvar(a:bufnr, 'minibrowser_precise_rebuilding', 0)
-        call s:precise_log('skip update: rebuilding')
         return
     endif
     let overlay_id = s:precise_overlay_id(a:bufnr)
     if overlay_id is# v:null
-        call s:precise_log('skip update: no overlay id')
         return
     endif
     let lnum = line('.')
@@ -172,26 +121,15 @@ function! s:precise_send_update(bufnr) abort
     let idx = s:precise_index_for_pos(a:bufnr, lnum, colnum)
     let options = {'preciseCursor': {'index': idx}}
     let range = s:precise_visual_range(a:bufnr)
-    if type(range) == type([])
-        call s:precise_log('visual selection ' . range[0] . ':' . range[1])
-        let options.preciseSelection = {'start': range[0], 'end': range[1]}
-        let options.preciseClearDebugSelection = v:true
+    if type(range) == type([]) && len(range) >= 2
+        let options.preciseSelection = {'start': range[0], 'end': range[1], 'linewise': len(range) > 2 ? range[2] : v:false}
         call setbufvar(a:bufnr, 'minibrowser_precise_had_selection', 1)
     else
         if getbufvar(a:bufnr, 'minibrowser_precise_had_selection', 0)
             let options.preciseClearSelection = v:true
             call setbufvar(a:bufnr, 'minibrowser_precise_had_selection', 0)
         endif
-        let word_range = s:precise_word_range(a:bufnr)
-        if type(word_range) == type([])
-            let options.preciseDebugSelection = {'start': word_range[0], 'end': word_range[1]}
-            call setbufvar(a:bufnr, 'minibrowser_precise_had_debug_selection', 1)
-        elseif getbufvar(a:bufnr, 'minibrowser_precise_had_debug_selection', 0)
-            let options.preciseClearDebugSelection = v:true
-            call setbufvar(a:bufnr, 'minibrowser_precise_had_debug_selection', 0)
-        endif
     endif
-    call s:precise_log('send update idx=' . idx)
     call s:rpc_notify('overlay:update', {'id': overlay_id, 'options': options})
 endfunction
 
@@ -204,7 +142,6 @@ function! s:precise_scroll(delta) abort
     if overlay_id is# v:null
         return
     endif
-    call s:precise_log('scroll lines=' . a:delta)
     let options = {'preciseScroll': {'lines': a:delta}}
     call s:rpc_notify('overlay:update', {'id': overlay_id, 'options': options})
     let count = abs(a:delta)
@@ -244,7 +181,6 @@ function! MiniBrowserPreciseRefresh(...) abort
     if !bufexists(buffer)
         return
     endif
-    call s:precise_log('refresh buffer=' . buffer)
     call setbufvar(buffer, 'minibrowser_precise_offsets', v:null)
     call setbufvar(buffer, 'minibrowser_precise_rebuilding', 0)
     call s:precise_send_update(buffer)
@@ -254,7 +190,6 @@ function! MiniBrowserPreciseApply(buffer, lines_json) abort
     if type(a:buffer) != type(0) || !bufexists(a:buffer)
         return
     endif
-    call s:precise_log('apply buffer=' . a:buffer)
     let prev_modifiable = getbufvar(a:buffer, '&modifiable')
     let prev_readonly = getbufvar(a:buffer, '&readonly')
     let lines = []
@@ -270,7 +205,6 @@ function! MiniBrowserPreciseApply(buffer, lines_json) abort
     if type(lines) != type([])
         let lines = []
     endif
-    call s:precise_log('apply lines=' . len(lines))
     call setbufvar(a:buffer, '&modifiable', 1)
     call setbufvar(a:buffer, '&readonly', 0)
     call setbufline(a:buffer, 1, lines)
@@ -293,18 +227,13 @@ function! MiniBrowserPreciseApplyFile(buffer, filepath) abort
     if type(a:filepath) != type('')
         return
     endif
-    call s:precise_log('apply file buffer=' . a:buffer)
     let content = ''
     try
         let content = join(readfile(a:filepath), "\n")
         call delete(a:filepath)
     catch
-        call s:precise_log('apply file read failed')
         return
     endtry
-    if content ==# ''
-        call s:precise_log('apply file empty')
-    endif
     call MiniBrowserPreciseApply(a:buffer, content)
 endfunction
 
@@ -327,14 +256,12 @@ function! MiniBrowserPreciseCommand(target, ...) abort
         return
     endif
     if enable
-        call s:precise_log('enable precise mode buffer=' . buffer)
         call setbufvar(buffer, 'minibrowser_precise', 1)
         call setbufvar(buffer, 'minibrowser_precise_offsets', v:null)
         call setbufvar(buffer, 'minibrowser_precise_rebuilding', 1)
         call s:precise_apply_maps(buffer)
         call s:rpc_notify('overlay:update', {'id': overlay_id, 'options': {'preciseMode': v:true, 'preciseRebuild': v:true}})
     else
-        call s:precise_log('disable precise mode buffer=' . buffer)
         call setbufvar(buffer, 'minibrowser_precise', 0)
         call s:precise_clear_maps(buffer)
         call s:rpc_notify('overlay:update', {'id': overlay_id, 'options': {'preciseMode': v:false, 'preciseClearSelection': v:true}})
@@ -486,7 +413,6 @@ function! MiniBrowserClose(...) abort
             call s:precise_clear_maps(info.buffer)
             call setbufvar(info.buffer, 'minibrowser_precise', 0)
             call setbufvar(info.buffer, 'minibrowser_precise_offsets', v:null)
-            call setbufvar(info.buffer, 'minibrowser_precise_had_debug_selection', 0)
         endif
         if bufexists(info.buffer)
             call setbufvar(info.buffer, 'minibrowser_overlay_id', v:null)

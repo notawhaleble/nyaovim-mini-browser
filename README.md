@@ -64,8 +64,11 @@ While the overlay has focus, pressing the same key (default `Ctrl+]`) will take 
 - `:MiniBrowser [url] [id]`: Open (or reuse) a mini browser overlay for the current buffer. If `url` is omitted, the previous page is shown; omit `id` to bind to the current buffer automatically, or supply your own name to manage overlays manually. Add `!` to avoid focusing the browser after opening.
 - `:MiniBrowserClose [id]`: Hide the mini browser attached to the current window (or the optional `id`).
 - `:MiniBrowserFocus[Browser|Editor|Toggle] [id]`: Focus the mini browser overlay, the editor, or toggle between them using either the current buffer or an explicit `id`.
+- `:MiniBrowserPrecise[On|Off|Toggle]`: Enable character-precise navigation/selection sync (caret + selection overlay) for the current buffer.
 
 ## Keymaps In Browser
+
+These keymaps are active only when the browser view has focus.
 
 | keymap | description |
 | ------ | ----------- |
@@ -73,11 +76,38 @@ While the overlay has focus, pressing the same key (default `Ctrl+]`) will take 
 | `k` | Scroll half page up |
 | `h` | Scroll half page left |
 | `l` | Scroll half page right |
-| `Ctrl+x` | Close mini browser |
-| `Ctrl+Shift+f` | Page goes forward |
-| `Ctrl+Shift+b` | Page goes back |
-| `Ctrl+r` | Reload page |
+| `Ctrl+]` | Toggle focus back to Vim |
+| `Ctrl+\\` then `Ctrl+n` | Focus Vim (insert-safe) |
+| `Ctrl+r` | Reload page (`Ctrl+Shift+r` ignores cache) |
+| `Ctrl+o` | Back in history |
+| `Ctrl+i` | Forward in history |
+| `Ctrl+w` | Send `<C-w>` to Vim and focus editor |
+| `Ctrl+l` | Echo current URL in `:messages` |
+| `Ctrl++` / `Ctrl+=` | Zoom in |
+| `Ctrl+-` | Zoom out |
 | `Ctrl+Shift+i` | Open DevTools window |
+
+## Precise Navigation Mode
+
+Precise mode keeps Vim as the control surface while the webview renders the page. It builds a text model from the rendered DOM, shows a caret overlay on the page, and mirrors Visual selections.
+
+- Enabled automatically on `:MiniBrowser` by default (toggle with `:MiniBrowserPreciseOff`).
+- Scroll is synced: `Ctrl-E`/`Ctrl-Y` scroll the page and the Vim window together.
+- Auto-rebuilds on load, resize, and zoom to keep mappings accurate.
+
+### Usage (Vim focused)
+
+- Move with normal Vim motions (`h/j/k/l`, `w`, `b`, `f`, etc.) and watch the caret on the page.
+- Select text with Visual mode (`v`) or linewise Visual (`V`); the page shows the same highlight.
+- Scroll with `Ctrl-E` / `Ctrl-Y`; the page scrolls without losing caret alignment.
+
+### Configuration
+
+Disable auto-enable:
+
+```vim
+let g:nyaovim_mini_browser_precise_auto = 0
+```
 
 ## Extend Your Usage
 

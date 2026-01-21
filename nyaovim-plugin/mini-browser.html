@@ -33,6 +33,7 @@
   const fs = require('fs');
   const os = require('os');
   const path = require('path');
+  const {clipboard} = require('electron');
 
   Polymer({
     is: 'mini-browser',
@@ -215,9 +216,26 @@
           }
           return;
         }
-        if (e.channel === 'mini-browser:precise-ready') {
+        if (e.channel === 'mini-browser:show-url') {
           const payload = Array.isArray(e.args) ? e.args[0] : undefined;
-          console.log('[mini-browser] precise preload ready', payload);
+          const url = payload && payload.url ? String(payload.url) : '';
+          if (url) {
+            this.showNotificationEcho(url, 2);
+            try {
+              if (clipboard && typeof clipboard.writeText === 'function') {
+                clipboard.writeText(url);
+              }
+            } catch (_err) {}
+          }
+          return;
+        }
+        if (e.channel === 'mini-browser:open-tab') {
+          const payload = Array.isArray(e.args) ? e.args[0] : undefined;
+          const url = payload && payload.url ? String(payload.url) : '';
+          if (!url) {
+            return;
+          }
+          this.openUrlInNewTab(url);
           return;
         }
         if (e.channel === 'mini-browser:toggle') {
@@ -301,9 +319,7 @@
           return;
         }
         e.preventDefault();
-        Promise.resolve(shell.openExternal(e.url)).catch(err => {
-          console.error('[mini-browser] failed to open external url', e.url, err);
-        });
+        this.openUrlInNewTab(e.url);
       });
       this.browser.addEventListener('permissionrequest', event => {
         if (!event || !event.request) {
@@ -1043,6 +1059,21 @@
       this.sendVimNotification(message, level, options);
     },
 
+    openUrlInNewTab(url) {
+      if (!this.client || typeof this.client.command !== 'function') {
+        Promise.resolve(shell.openExternal(url)).catch(err => {
+          console.error('[mini-browser] failed to open external url', url, err);
+        });
+        return;
+      }
+      const escaped = String(url).replace(/\\/g, '\\\\').replace(/'/g, "''");
+      const command = `tabnew | call MiniBrowserOpen(1, '${escaped}')`;
+      this.client.command(command).catch(err => {
+        console.error('[mini-browser] failed to open url in new tab', url, err);
+        Promise.resolve(shell.openExternal(url)).catch(() => {});
+      });
+    },
+
     sendVimNotification(message, logLevel, opts) {
       if (!this.client) {
         return;
@@ -1194,12 +1225,6 @@
       if (options.preciseClearSelection) {
         this.sendPreciseSelection({clear: true});
       }
-      if (options.preciseDebugSelection) {
-        this.sendPreciseDebugSelection(options.preciseDebugSelection);
-      }
-      if (options.preciseClearDebugSelection) {
-        this.sendPreciseDebugSelection({clear: true});
-      }
       if (options.preciseScroll) {
         this.sendPreciseScroll(options.preciseScroll);
       }
@@ -1219,9 +1244,6 @@
       }
       const pending = this.precise.pendingMessages || [];
       this.precise.pendingMessages = [];
-      if (pending.length) {
-        console.log('[mini-browser] precise flush', pending);
-      }
       pending.forEach(message => {
         this.browser.send('mini-browser:precise-update', message);
       });
@@ -1244,7 +1266,6 @@
       }
       const next = !!enabled;
       this.precise.enabled = next;
-      console.log('[mini-browser] precise mode', next);
       this.sendPreciseMessage({type: 'mode', enabled: next});
       if (!next) {
         this.precise.lastCursorIndex = null;
@@ -1256,7 +1277,6 @@
       if (!this.precise || !this.precise.enabled) {
         return;
       }
-      console.log('[mini-browser] precise rebuild request');
       this.sendPreciseMessage({type: 'rebuild'});
     },
 
@@ -1270,7 +1290,6 @@
       }
       this.preciseRebuildTimer = setTimeout(() => {
         this.preciseRebuildTimer = null;
-        console.log('[mini-browser] precise rebuild schedule', reason || 'auto');
         this.requestPreciseRebuild();
       }, delay);
     },
@@ -1286,7 +1305,6 @@
       if (index === null) {
         return;
       }
-      console.log('[mini-browser] precise cursor', index);
       this.precise.lastCursorIndex = index;
       this.sendPreciseMessage({type: 'cursor', index});
     },
@@ -1300,37 +1318,17 @@
       }
       if (payload && payload.clear) {
         this.precise.lastSelection = null;
-        console.log('[mini-browser] precise selection clear');
         this.sendPreciseMessage({type: 'selection', clear: true});
         return;
       }
       const start = payload && typeof payload.start === 'number' ? payload.start : null;
       const end = payload && typeof payload.end === 'number' ? payload.end : null;
+      const linewise = !!(payload && payload.linewise);
       if (start === null || end === null) {
         return;
       }
-      console.log('[mini-browser] precise selection', start, end);
-      this.precise.lastSelection = {start, end};
-      this.sendPreciseMessage({type: 'selection', start, end});
-    },
-
-    sendPreciseDebugSelection(payload) {
-      if (!this.precise || !this.precise.enabled) {
-        return;
-      }
-      if (this.activeTarget === 'browser') {
-        return;
-      }
-      if (payload && payload.clear) {
-        this.sendPreciseMessage({type: 'debug-selection', clear: true});
-        return;
-      }
-      const start = payload && typeof payload.start === 'number' ? payload.start : null;
-      const end = payload && typeof payload.end === 'number' ? payload.end : null;
-      if (start === null || end === null) {
-        return;
-      }
-      this.sendPreciseMessage({type: 'debug-selection', start, end});
+      this.precise.lastSelection = {start, end, linewise};
+      this.sendPreciseMessage({type: 'selection', start, end, linewise});
     },
 
     sendPreciseScroll(payload) {
@@ -1341,7 +1339,6 @@
       if (!lines) {
         return;
       }
-      console.log('[mini-browser] precise scroll', lines);
       this.sendPreciseMessage({type: 'scroll', lines});
     },
 
@@ -1353,7 +1350,6 @@
       if (!Number.isFinite(bufferId) || !this.client) {
         return;
       }
-      console.log('[mini-browser] precise map received', {lines: payload.lines.length});
       const lines = payload.lines.map(line => (line === undefined || line === null) ? '' : String(line));
       const updateBuffer = async () => {
         try {
@@ -1362,7 +1358,6 @@
           const filepath = path.join(os.tmpdir(), filename);
           fs.writeFileSync(filepath, jsonLines, 'utf8');
           const escapedPath = filepath.replace(/'/g, "''");
-          console.log('[mini-browser] precise apply buffer', {bufferId, length: jsonLines.length, filepath});
           await this.client.command(`call MiniBrowserPreciseApplyFile(${bufferId}, '${escapedPath}')`);
         } catch (err) {
           console.error('[mini-browser] precise map update failed', err);
